@@ -6,10 +6,13 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
 from marshmallow import ValidationError
+import redis as redis_lib
+from sqlalchemy import text
 
 from config import build_config
 from errors import error_response, register_error_handlers
-from middleware import register_request_id
+from middleware import log_event, register_request_id
+from metrics import register_metrics
 from models import Category, Product, db
 from schemas import ProductCreateSchema, ProductUpdateSchema, StockItemSchema
 
@@ -79,6 +82,7 @@ def create_app(testing: bool = False) -> Flask:
     CORS(app, origins=config["CORS_ORIGINS"])
     register_error_handlers(app)
     register_request_id(app, "product-service")
+    register_metrics(app)
 
     limiter = Limiter(
         key_func=get_remote_address,
@@ -112,7 +116,32 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
 
     @app.get("/health")
     def health():
+        """Liveness: el proceso está vivo. No depende de nada externo."""
         return jsonify(status="ok", service="product-service")
+
+    @app.get("/readiness")
+    def readiness():
+        """Readiness: Postgres y Redis (usado por el rate limiter) responden."""
+        checks = {}
+        try:
+            db.session.execute(text("SELECT 1"))
+            checks["database"] = "ok"
+        except Exception:
+            checks["database"] = "error"
+
+        redis_uri = app.config.get("RATELIMIT_STORAGE_URI", "")
+        if redis_uri.startswith("redis://"):
+            try:
+                redis_lib.from_url(redis_uri, socket_connect_timeout=2).ping()
+                checks["redis"] = "ok"
+            except Exception:
+                checks["redis"] = "error"
+        else:
+            checks["redis"] = "skipped"
+
+        if all(v in ("ok", "skipped") for v in checks.values()):
+            return jsonify(status="ready", checks=checks)
+        return error_response("NOT_READY", "el servicio no está listo", 503, details=checks)
 
     @app.get("/products")
     def list_products():
@@ -232,6 +261,11 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
             })
         db.session.commit()
 
+        log_event(
+            "product-service",
+            "stock_reserved",
+            items=[{"product_id": r["product_id"], "quantity": r["quantity"]} for r in reserved],
+        )
         return jsonify(items=reserved)
 
     @app.post("/internal/release-stock")
@@ -256,6 +290,7 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
             released.append({"product_id": product.id, "quantity": item["quantity"]})
         db.session.commit()
 
+        log_event("product-service", "stock_released", items=released, skipped=skipped)
         return jsonify(released=released, skipped=skipped)
 
 

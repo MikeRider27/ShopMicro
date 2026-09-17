@@ -62,6 +62,9 @@ Postgres crea automáticamente las 3 bases de datos la primera vez que arranca (
 | products | POST/PUT/DELETE | `/api/products/products` | Admin (header `X-Admin-Key`, ver `ADMIN_API_KEY`) |
 | orders | POST | `/api/orders/orders` | Crear pedido (requiere JWT y header `Idempotency-Key`) |
 | orders | GET | `/api/orders/orders` | Historial del usuario autenticado |
+| todos | GET | `/api/<auth\|products\|orders>/health` | Liveness (no depende de nada externo) |
+| todos | GET | `/api/<auth\|products\|orders>/readiness` | Readiness (chequea Postgres y, si aplica, Redis) |
+| todos | GET | `/api/<auth\|products\|orders>/metrics` | Métricas en formato Prometheus |
 
 ## Datos de demo adicionales
 
@@ -171,11 +174,20 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 
 - **Timeouts explícitos:** toda llamada de `order-service` a `product-service` tiene un timeout de 10s (`PRODUCT_SERVICE_TIMEOUT_SECONDS`) — nunca se queda esperando indefinidamente si el otro servicio no responde.
 - **Reintentos, pero solo donde son seguros:** `reserve-stock` y `release-stock` **no son idempotentes** (llamarlos dos veces descuenta/devuelve stock dos veces), así que `order-service` reintenta (hasta 2 veces, con backoff corto) *solo* ante `ConnectionError` — el request nunca llegó al otro servicio, reintentar no tiene riesgo. Un timeout de lectura (`ReadTimeout`, el request sí pudo haber llegado y procesarse) **no se reintenta**: se propaga como `503` de inmediato, para no arriesgar una doble reserva. Ver `_post_to_product_service` en `services/order-service/app.py`.
-- **Correlation ID (`X-Request-ID`):** el frontend genera un UUID por request (`frontend/lib/api.ts`); el gateway lo respeta si viene, o genera uno con `$request_id` de nginx si no; cada microservicio lo lee (o genera uno si lo llaman directo), lo devuelve en la respuesta, y lo incluye en cada línea de log (`middleware.py` en cada servicio) — incluida la propagación de `order-service` hacia `product-service` en las llamadas internas. Esto permite seguir un mismo request a través de los logs de varios servicios, por ejemplo cuando `product-service` está caído:
-  ```
-  [2026-09-17 20:06:44] [trace-retry-test] WARNING in order-service: No se pudo conectar a product-service (intento 1/2), reintentando...
-  ```
+- **Correlation ID (`X-Request-ID`):** el frontend genera un UUID por request (`frontend/lib/api.ts`); el gateway lo respeta si viene, o genera uno con `$request_id` de nginx si no; cada microservicio lo lee (o genera uno si lo llaman directo), lo devuelve en la respuesta, y lo incluye en cada línea de log (`middleware.py` en cada servicio) — incluida la propagación de `order-service` hacia `product-service` en las llamadas internas. Esto permite seguir un mismo request a través de los logs de varios servicios (ver ejemplo en la sección de Observabilidad).
 - **URLs de servicios centralizadas:** `docker-compose.yml` es la única fuente de verdad de cómo se direccionan los servicios entre sí (`PRODUCT_SERVICE_URL=http://product-service:5002`, nombres de servicio = hostnames de Docker); `config.py` de cada servicio solo tiene un fallback para correrlo suelto (tests, `flask run` local).
+
+## Observabilidad
+
+- **Logs estructurados (JSON):** cada línea de log de los 3 servicios es un objeto JSON (`timestamp`, `level`, `logger`, `message`, `request_id`, y cualquier campo extra), listo para mandar a ELK/Loki/CloudWatch sin parsear texto plano (`JsonFormatter` en `middleware.py`). Ejemplo real, un pedido creado — notá el mismo `request_id` en ambos servicios:
+  ```json
+  {"timestamp": "2026-09-17T20:20:22+0000", "logger": "product-service", "message": "stock_reserved", "request_id": "ecac48b7...", "event": "stock_reserved", "items": [{"product_id": 1, "quantity": 1}]}
+  {"timestamp": "2026-09-17T20:20:22+0000", "logger": "order-service", "message": "order_created", "request_id": "ecac48b7...", "event": "order_created", "order_id": 1, "user_id": 1, "total": 29.99, "item_count": 1}
+  ```
+- **Nunca se loguean credenciales:** ni contraseñas, ni tokens JWT, ni `X-Admin-Key`, ni el body de los requests. Los eventos de negocio (`log_event`) solo llevan IDs, cantidades y montos — por ejemplo `user_registered` loguea `user_id`, nunca el email.
+- **Eventos de negocio registrados:** `user_registered` (auth-service), `stock_reserved` / `stock_released` (product-service), `order_created` / `order_idempotent_replay` / `order_stock_compensated` (order-service).
+- **Métricas básicas:** cada servicio expone `GET /metrics` en formato Prometheus — `http_requests_total`, `http_request_duration_seconds` y `http_request_errors_total`, con labels de método/endpoint/status. No requiere infraestructura extra, cualquier Prometheus puede scrapearlo directo.
+- **Health vs. readiness:** `GET /health` (liveness) no depende de nada externo — si responde, el proceso está vivo. `GET /readiness` chequea Postgres (y Redis donde aplica) y devuelve `503` si alguno falla; es lo que usa el `healthcheck` de `docker-compose.yml` para no marcar un servicio como sano si todavía no puede atender tráfico de verdad.
 
 ## Notas de diseño / simplificaciones
 
@@ -185,7 +197,7 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: logs estructurados (JSON) y métricas, health vs. readiness separados, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: hardening adicional de Docker (usuario no root, versiones de imágenes base fijadas), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY). También quedan pendientes, mencionados por el plan de mejoras pero fuera de este alcance: un Prometheus/Grafana real scrapeando los `/metrics` (hoy solo se exponen), y agregación centralizada de logs (hoy quedan en `docker compose logs`, no en un ELK/Loki).
 
 ------------------------------------------------------------------------
 

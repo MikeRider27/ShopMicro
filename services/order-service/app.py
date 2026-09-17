@@ -7,11 +7,13 @@ from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
 from flask_migrate import Migrate
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from config import build_config
 from errors import error_response, parse_upstream_error, register_error_handlers
-from middleware import register_request_id
+from middleware import log_event, register_request_id
+from metrics import register_metrics
 from models import Order, OrderItem, db
 from schemas import CreateOrderSchema
 
@@ -39,6 +41,7 @@ def create_app(testing: bool = False) -> Flask:
     register_error_handlers(app)
     register_jwt_error_handlers(jwt)
     register_request_id(app, "order-service")
+    register_metrics(app)
 
     if testing:
         # En producción el esquema lo crean las migraciones (ver migrations/).
@@ -96,7 +99,25 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/health")
     def health():
+        """Liveness: el proceso está vivo. No depende de nada externo."""
         return jsonify(status="ok", service="order-service")
+
+    @app.get("/readiness")
+    def readiness():
+        """Readiness: Postgres responde. No chequea product-service a
+        propósito — si product-service tiene un problema puntual, order-service
+        igual puede atender GET /orders normalmente; marcarlo "no ready" acá
+        provocaría una falla en cascada innecesaria."""
+        checks = {}
+        try:
+            db.session.execute(text("SELECT 1"))
+            checks["database"] = "ok"
+        except Exception:
+            checks["database"] = "error"
+
+        if all(v == "ok" for v in checks.values()):
+            return jsonify(status="ready", checks=checks)
+        return error_response("NOT_READY", "el servicio no está listo", 503, details=checks)
 
     def _release_stock(items: list) -> None:
         """Compensación: intenta devolver stock ya reservado. Best-effort:
@@ -128,6 +149,7 @@ def register_routes(app: Flask) -> None:
         # devolvemos el pedido existente en vez de reservar stock de nuevo.
         existing = Order.query.filter_by(user_id=user_id, idempotency_key=idempotency_key).first()
         if existing:
+            log_event("order-service", "order_idempotent_replay", order_id=existing.id, user_id=user_id)
             return jsonify(order=existing.to_dict()), 200
 
         reserve_payload = [
@@ -173,6 +195,7 @@ def register_routes(app: Flask) -> None:
             # veces; se libera esta reserva duplicada y se devuelve el pedido
             # que sí quedó guardado.
             db.session.rollback()
+            log_event("order-service", "order_stock_compensated", reason="idempotency_race", items=reserved_items)
             _release_stock(reserved_items)
             existing = Order.query.filter_by(user_id=user_id, idempotency_key=idempotency_key).first()
             if existing:
@@ -184,6 +207,7 @@ def register_routes(app: Flask) -> None:
             # except es deliberadamente amplio, no solo errores de SQLAlchemy.
             db.session.rollback()
             logger.exception("Falló al guardar el pedido tras reservar stock, compensando...")
+            log_event("order-service", "order_stock_compensated", reason="save_failed", items=reserved_items)
             _release_stock(reserved_items)
             return error_response(
                 "ORDER_SAVE_FAILED",
@@ -191,6 +215,14 @@ def register_routes(app: Flask) -> None:
                 500,
             )
 
+        log_event(
+            "order-service",
+            "order_created",
+            order_id=order.id,
+            user_id=user_id,
+            total=float(order.total),
+            item_count=len(order.items),
+        )
         return jsonify(order=order.to_dict()), 201
 
     @app.get("/orders")

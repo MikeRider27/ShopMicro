@@ -1,9 +1,27 @@
+import logging
+
 from conftest import ADMIN_HEADERS
 
 
 def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
+
+
+def test_readiness_ok(client):
+    resp = client.get("/readiness")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert data["checks"]["database"] == "ok"
+    assert data["checks"]["redis"] == "skipped"
+
+
+def test_metrics_endpoint(client):
+    client.get("/health")
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert b"http_requests_total" in resp.data
 
 
 def test_request_id_is_generated_when_missing(client):
@@ -159,6 +177,16 @@ def test_reserve_stock_success(client, sample_product):
 
     updated = client.get(f"/products/{sample_product['id']}").get_json()["product"]
     assert updated["stock"] == sample_product["stock"] - 2
+
+
+def test_reserve_stock_logs_business_event(client, sample_product, caplog):
+    with caplog.at_level(logging.INFO, logger="product-service"):
+        client.post(
+            "/internal/reserve-stock",
+            json=[{"product_id": sample_product["id"], "quantity": 1}],
+        )
+    events = [r.event for r in caplog.records if hasattr(r, "event")]
+    assert "stock_reserved" in events
 
 
 def test_reserve_stock_insufficient(client, sample_product):

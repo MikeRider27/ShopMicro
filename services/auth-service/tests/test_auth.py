@@ -11,6 +11,23 @@ def test_health(client):
     assert resp.get_json()["status"] == "ok"
 
 
+def test_readiness_ok(client):
+    resp = client.get("/readiness")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert data["checks"]["database"] == "ok"
+    # En testing el rate limiter usa memory://, no redis://.
+    assert data["checks"]["redis"] == "skipped"
+
+
+def test_metrics_endpoint(client):
+    client.get("/health")  # generar al menos una métrica
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert b"http_requests_total" in resp.data
+
+
 def test_request_id_is_generated_when_missing(client):
     resp = client.get("/health")
     assert resp.headers.get("X-Request-ID")

@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import patch
 
 import requests
@@ -29,6 +30,19 @@ def test_request_id_is_generated_when_missing(client):
 def test_request_id_is_echoed_when_provided(client):
     resp = client.get("/health", headers={"X-Request-ID": "abc-123"})
     assert resp.headers.get("X-Request-ID") == "abc-123"
+
+
+def test_readiness_ok(client):
+    resp = client.get("/readiness")
+    assert resp.status_code == 200
+    assert resp.get_json()["checks"]["database"] == "ok"
+
+
+def test_metrics_endpoint(client):
+    client.get("/health")
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert b"http_requests_total" in resp.data
 
 
 def test_create_order_requires_auth(client):
@@ -125,6 +139,22 @@ def test_create_order_success(mock_post, client, auth_headers):
     order = resp.get_json()["order"]
     assert order["total"] == 20.0
     assert order["items"][0]["product_name"] == "Producto"
+
+
+@patch("app.requests.post")
+def test_create_order_logs_business_event(mock_post, client, auth_headers, caplog):
+    mock_post.return_value = FakeResponse(
+        200,
+        {"items": [{"product_id": 1, "name": "Producto", "unit_price": 10.0, "quantity": 1}]},
+    )
+    with caplog.at_level(logging.INFO, logger="order-service"):
+        client.post(
+            "/orders",
+            json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "Calle 1"},
+            headers=with_key(auth_headers),
+        )
+    events = [r.event for r in caplog.records if hasattr(r, "event")]
+    assert "order_created" in events
 
 
 @patch("app.requests.post")

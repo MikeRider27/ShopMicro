@@ -11,10 +11,13 @@ from flask_jwt_extended import (
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
+import redis as redis_lib
+from sqlalchemy import text
 
 from config import build_config
 from errors import error_response, register_error_handlers
-from middleware import register_request_id
+from middleware import log_event, register_request_id
+from metrics import register_metrics
 from models import User, db
 from schemas import LoginSchema, RegisterSchema
 
@@ -31,6 +34,7 @@ def create_app(testing: bool = False) -> Flask:
     register_error_handlers(app)
     register_jwt_error_handlers(jwt)
     register_request_id(app, "auth-service")
+    register_metrics(app)
 
     limiter = Limiter(
         key_func=get_remote_address,
@@ -73,7 +77,35 @@ def register_jwt_error_handlers(jwt: JWTManager) -> None:
 def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.get("/health")
     def health():
+        """Liveness: el proceso está vivo y puede responder. No depende de
+        nada externo (a propósito, para no marcar el servicio como caído por
+        una falla de Postgres/Redis que la readiness ya reporta aparte)."""
         return jsonify(status="ok", service="auth-service")
+
+    @app.get("/readiness")
+    def readiness():
+        """Readiness: el servicio puede efectivamente atender tráfico
+        (Postgres y, si aplica, Redis responden)."""
+        checks = {}
+        try:
+            db.session.execute(text("SELECT 1"))
+            checks["database"] = "ok"
+        except Exception:
+            checks["database"] = "error"
+
+        redis_uri = app.config.get("RATELIMIT_STORAGE_URI", "")
+        if redis_uri.startswith("redis://"):
+            try:
+                redis_lib.from_url(redis_uri, socket_connect_timeout=2).ping()
+                checks["redis"] = "ok"
+            except Exception:
+                checks["redis"] = "error"
+        else:
+            checks["redis"] = "skipped"
+
+        if all(v in ("ok", "skipped") for v in checks.values()):
+            return jsonify(status="ready", checks=checks)
+        return error_response("NOT_READY", "el servicio no está listo", 503, details=checks)
 
     @app.post("/register")
     @limiter.limit("10 per minute")
@@ -90,6 +122,9 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
         user.set_password(payload["password"])
         db.session.add(user)
         db.session.commit()
+
+        # Solo el user_id, nunca el email (dato personal) ni la contraseña.
+        log_event("auth-service", "user_registered", user_id=user.id)
 
         token = create_access_token(identity=str(user.id))
         return jsonify(user=user.to_dict(), access_token=token), 201

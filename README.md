@@ -117,7 +117,7 @@ GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance (ver `ShopMicro_Lista_de_Mejoras.pdf`): migraciones con Alembic, idempotencia y compensación de stock, validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: migraciones con Alembic, idempotencia y compensación de stock, validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

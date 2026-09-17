@@ -2,17 +2,11 @@ import os
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
-from config import Config
+from config import build_config
 from models import Category, Product, db
-
-app = Flask(__name__)
-app.config.from_object(Config)
-
-db.init_app(app)
-CORS(app)
-
-ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "admin-secret")
 
 SEED_CATEGORIES = ["Electrónica", "Ropa", "Hogar", "Libros"]
 SEED_PRODUCTS = [
@@ -58,137 +52,172 @@ def seed_if_empty():
     db.session.commit()
 
 
-with app.app_context():
-    db.create_all()
-    seed_if_empty()
+def create_app(testing: bool = False) -> Flask:
+    app = Flask(__name__)
+    config = build_config(testing=testing)
+    app.config.update(config)
 
+    db.init_app(app)
+    CORS(app, origins=config["CORS_ORIGINS"])
 
-def require_admin():
-    key = request.headers.get("X-Admin-Key")
-    return key == ADMIN_API_KEY
-
-
-@app.get("/health")
-def health():
-    return jsonify(status="ok", service="product-service")
-
-
-@app.get("/products")
-def list_products():
-    query = Product.query
-    category = request.args.get("category")
-    search = request.args.get("search")
-    if category:
-        query = query.join(Category).filter(Category.name.ilike(category))
-    if search:
-        query = query.filter(Product.name.ilike(f"%{search}%"))
-    products = query.order_by(Product.id).all()
-    return jsonify(products=[p.to_dict() for p in products])
-
-
-@app.get("/products/<int:product_id>")
-def get_product(product_id):
-    product = db.session.get(Product, product_id)
-    if not product:
-        return jsonify(error="producto no encontrado"), 404
-    return jsonify(product=product.to_dict())
-
-
-@app.get("/categories")
-def list_categories():
-    categories = Category.query.order_by(Category.name).all()
-    return jsonify(categories=[c.to_dict() for c in categories])
-
-
-@app.post("/products")
-def create_product():
-    if not require_admin():
-        return jsonify(error="no autorizado"), 403
-    data = request.get_json(silent=True) or {}
-    required = ("name", "price")
-    if not all(data.get(f) not in (None, "") for f in required):
-        return jsonify(error="name y price son requeridos"), 400
-
-    category = None
-    if data.get("category_id"):
-        category = db.session.get(Category, data["category_id"])
-
-    product = Product(
-        name=data["name"],
-        description=data.get("description", ""),
-        price=data["price"],
-        stock=data.get("stock", 0),
-        image_url=data.get("image_url", ""),
-        category=category,
+    limiter = Limiter(
+        key_func=get_remote_address,
+        app=app,
+        default_limits=[],
+        enabled=not testing,
     )
-    db.session.add(product)
-    db.session.commit()
-    return jsonify(product=product.to_dict()), 201
+    app.extensions["ecommerce_limiter"] = limiter
+
+    with app.app_context():
+        db.create_all()
+        if not testing:
+            seed_if_empty()
+
+    register_routes(app, limiter)
+    return app
 
 
-@app.put("/products/<int:product_id>")
-def update_product(product_id):
-    if not require_admin():
-        return jsonify(error="no autorizado"), 403
-    product = db.session.get(Product, product_id)
-    if not product:
-        return jsonify(error="producto no encontrado"), 404
+def register_routes(app: Flask, limiter: Limiter) -> None:
+    def require_admin() -> bool:
+        return request.headers.get("X-Admin-Key") == app.config["ADMIN_API_KEY"]
 
-    data = request.get_json(silent=True) or {}
-    for field in ("name", "description", "price", "stock", "image_url"):
-        if field in data:
-            setattr(product, field, data[field])
-    if "category_id" in data:
-        product.category_id = data["category_id"]
+    @app.get("/health")
+    def health():
+        return jsonify(status="ok", service="product-service")
 
-    db.session.commit()
-    return jsonify(product=product.to_dict())
+    @app.get("/products")
+    def list_products():
+        query = Product.query
+        category = request.args.get("category")
+        search = request.args.get("search")
+        if category:
+            query = query.join(Category).filter(Category.name.ilike(category))
+        if search:
+            query = query.filter(Product.name.ilike(f"%{search}%"))
+        products = query.order_by(Product.id).all()
+        return jsonify(products=[p.to_dict() for p in products])
 
-
-@app.delete("/products/<int:product_id>")
-def delete_product(product_id):
-    if not require_admin():
-        return jsonify(error="no autorizado"), 403
-    product = db.session.get(Product, product_id)
-    if not product:
-        return jsonify(error="producto no encontrado"), 404
-    db.session.delete(product)
-    db.session.commit()
-    return jsonify(message="producto eliminado")
-
-
-@app.post("/internal/reserve-stock")
-def reserve_stock():
-    """Usado por order-service para validar y descontar stock al crear un pedido."""
-    items = request.get_json(silent=True) or []
-    if not isinstance(items, list) or not items:
-        return jsonify(error="se requiere una lista de items"), 400
-
-    products_by_id = {}
-    for item in items:
-        product = db.session.get(Product, item.get("product_id"))
+    @app.get("/products/<int:product_id>")
+    def get_product(product_id):
+        product = db.session.get(Product, product_id)
         if not product:
-            return jsonify(error=f"producto {item.get('product_id')} no existe"), 404
-        quantity = int(item.get("quantity", 0))
-        if quantity <= 0:
-            return jsonify(error="quantity debe ser mayor a 0"), 400
-        if product.stock < quantity:
-            return jsonify(error=f"stock insuficiente para '{product.name}'"), 409
-        products_by_id[product.id] = (product, quantity)
+            return jsonify(error="producto no encontrado"), 404
+        return jsonify(product=product.to_dict())
 
-    reserved = []
-    for product, quantity in products_by_id.values():
-        product.stock -= quantity
-        reserved.append({
-            "product_id": product.id,
-            "name": product.name,
-            "unit_price": float(product.price),
-            "quantity": quantity,
-        })
-    db.session.commit()
+    @app.get("/categories")
+    def list_categories():
+        categories = Category.query.order_by(Category.name).all()
+        return jsonify(categories=[c.to_dict() for c in categories])
 
-    return jsonify(items=reserved)
+    @app.post("/products")
+    @limiter.limit("20 per minute")
+    def create_product():
+        if not require_admin():
+            return jsonify(error="no autorizado"), 403
+        data = request.get_json(silent=True) or {}
+        required = ("name", "price")
+        if not all(data.get(f) not in (None, "") for f in required):
+            return jsonify(error="name y price son requeridos"), 400
+        try:
+            price = float(data["price"])
+            stock = int(data.get("stock", 0))
+        except (TypeError, ValueError):
+            return jsonify(error="price y stock deben ser numéricos"), 400
+        if price < 0 or stock < 0:
+            return jsonify(error="price y stock no pueden ser negativos"), 400
 
+        category = None
+        if data.get("category_id"):
+            category = db.session.get(Category, data["category_id"])
+
+        product = Product(
+            name=data["name"],
+            description=data.get("description", ""),
+            price=price,
+            stock=stock,
+            image_url=data.get("image_url", ""),
+            category=category,
+        )
+        db.session.add(product)
+        db.session.commit()
+        return jsonify(product=product.to_dict()), 201
+
+    @app.put("/products/<int:product_id>")
+    @limiter.limit("20 per minute")
+    def update_product(product_id):
+        if not require_admin():
+            return jsonify(error="no autorizado"), 403
+        product = db.session.get(Product, product_id)
+        if not product:
+            return jsonify(error="producto no encontrado"), 404
+
+        data = request.get_json(silent=True) or {}
+        if "price" in data or "stock" in data:
+            try:
+                if "price" in data:
+                    data["price"] = float(data["price"])
+                if "stock" in data:
+                    data["stock"] = int(data["stock"])
+            except (TypeError, ValueError):
+                return jsonify(error="price y stock deben ser numéricos"), 400
+            if data.get("price", 0) < 0 or data.get("stock", 0) < 0:
+                return jsonify(error="price y stock no pueden ser negativos"), 400
+
+        for field in ("name", "description", "price", "stock", "image_url"):
+            if field in data:
+                setattr(product, field, data[field])
+        if "category_id" in data:
+            product.category_id = data["category_id"]
+
+        db.session.commit()
+        return jsonify(product=product.to_dict())
+
+    @app.delete("/products/<int:product_id>")
+    @limiter.limit("20 per minute")
+    def delete_product(product_id):
+        if not require_admin():
+            return jsonify(error="no autorizado"), 403
+        product = db.session.get(Product, product_id)
+        if not product:
+            return jsonify(error="producto no encontrado"), 404
+        db.session.delete(product)
+        db.session.commit()
+        return jsonify(message="producto eliminado")
+
+    @app.post("/internal/reserve-stock")
+    def reserve_stock():
+        """Usado por order-service para validar y descontar stock al crear un pedido."""
+        items = request.get_json(silent=True) or []
+        if not isinstance(items, list) or not items:
+            return jsonify(error="se requiere una lista de items"), 400
+
+        products_by_id = {}
+        for item in items:
+            product = db.session.get(Product, item.get("product_id"))
+            if not product:
+                return jsonify(error=f"producto {item.get('product_id')} no existe"), 404
+            quantity = int(item.get("quantity", 0))
+            if quantity <= 0:
+                return jsonify(error="quantity debe ser mayor a 0"), 400
+            if product.stock < quantity:
+                return jsonify(error=f"stock insuficiente para '{product.name}'"), 409
+            products_by_id[product.id] = (product, quantity)
+
+        reserved = []
+        for product, quantity in products_by_id.values():
+            product.stock -= quantity
+            reserved.append({
+                "product_id": product.id,
+                "name": product.name,
+                "unit_price": float(product.price),
+                "quantity": quantity,
+            })
+        db.session.commit()
+
+        return jsonify(items=reserved)
+
+
+app = create_app() if os.environ.get("TESTING") != "1" else None
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5002)

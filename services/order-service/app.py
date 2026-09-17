@@ -4,6 +4,7 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
+from flask_migrate import Migrate
 
 from config import build_config
 from models import Order, OrderItem, db
@@ -17,11 +18,14 @@ def create_app(testing: bool = False) -> Flask:
     app.config.update(config)
 
     db.init_app(app)
+    Migrate(app, db)
     JWTManager(app)
     CORS(app, origins=config["CORS_ORIGINS"])
 
-    with app.app_context():
-        db.create_all()
+    if testing:
+        # En producción el esquema lo crean las migraciones (ver migrations/).
+        with app.app_context():
+            db.create_all()
 
     register_routes(app)
     return app

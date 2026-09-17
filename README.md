@@ -44,7 +44,7 @@ Por defecto todo corre contenido en Docker (Postgres y Redis incluidos), sin dep
 docker compose up --build
 ```
 
-Postgres crea automáticamente las 3 bases de datos la primera vez que arranca (`docker/postgres-initdb/01-create-databases.sh`), y cada microservicio crea sus propias tablas al iniciar (`db.create_all()`); `product-service` además siembra un catálogo de ejemplo si está vacío.
+Postgres crea automáticamente las 3 bases de datos la primera vez que arranca (`docker/postgres-initdb/01-create-databases.sh`). Cada microservicio aplica sus propias migraciones al iniciar (`flask db upgrade`, ver [Migraciones](#migraciones)); `product-service` además siembra un catálogo de ejemplo si está vacío (`flask seed`).
 
 - Frontend: http://localhost:3000
 - Gateway (API): http://localhost:8080/api/...
@@ -74,6 +74,34 @@ GATEWAY_URL=http://localhost:8080 ADMIN_API_KEY=tu-admin-key python3 scripts/see
 ```
 
 Usuarios creados: `ana@example.com`, `carlos@example.com`, `maria@example.com` (contraseña `demo1234`).
+
+## Migraciones
+
+Cada microservicio usa Flask-Migrate/Alembic (carpeta `migrations/`) en vez de `db.create_all()`. El `entrypoint.sh` de cada contenedor corre `flask db upgrade` automáticamente antes de levantar gunicorn, así que con `docker compose up` no hay que hacer nada manual.
+
+Para cambiar el esquema de un servicio (ejemplo con `product-service`):
+
+```bash
+cd services/product-service
+
+# 1. Modificar los modelos en models.py
+
+# 2. Generar la migración contra una base con el esquema actual
+#    (podés usar el Postgres de docker-compose: docker compose up -d postgres)
+FLASK_APP=app.py POSTGRES_HOST=localhost POSTGRES_PORT=5432 \
+  POSTGRES_USER=... POSTGRES_PASSWORD=... POSTGRES_DB=ecommerce_products \
+  CORS_ALLOWED_ORIGINS=http://localhost:3000 ADMIN_API_KEY=... \
+  flask db migrate -m "descripción del cambio"
+
+# 3. Revisar el archivo generado en migrations/versions/ (Alembic no siempre
+#    acierta con renombres o cambios de tipo) y aplicarla
+flask db upgrade
+
+# Revertir la última migración si algo salió mal:
+flask db downgrade -1
+```
+
+En producción, el `entrypoint.sh` de cada servicio aplica las migraciones pendientes automáticamente al arrancar el contenedor.
 
 ## Tests
 
@@ -113,11 +141,10 @@ GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 - `order-service` llama a `product-service` (`/internal/reserve-stock`) para validar y descontar stock de forma síncrona al crear un pedido. **Limitación conocida:** si `order-service` falla al guardar el pedido después de que `product-service` ya descontó el stock, el stock no se libera automáticamente (no hay compensación/saga todavía) — queda documentado como mejora pendiente.
 - La escritura del catálogo (`POST/PUT/DELETE /products`) está protegida por un header simple `X-Admin-Key` (variable `ADMIN_API_KEY`), pensado para administración interna, no para el frontend público.
 - El carrito de compras vive en el cliente (localStorage), no hay carrito persistido en base de datos.
-- Las tablas se crean con `db.create_all()` en vez de migraciones versionadas (Alembic/Flask-Migrate); es una limitación conocida para evolucionar el esquema en producción.
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: migraciones con Alembic, idempotencia y compensación de stock, validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: idempotencia y compensación de stock, validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

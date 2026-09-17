@@ -10,6 +10,7 @@ from flask_jwt_extended import (
 )
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_migrate import Migrate
 
 from config import build_config
 from models import User, db
@@ -21,6 +22,7 @@ def create_app(testing: bool = False) -> Flask:
     app.config.update(config)
 
     db.init_app(app)
+    Migrate(app, db)
     JWTManager(app)
     CORS(app, origins=config["CORS_ORIGINS"])
 
@@ -34,8 +36,12 @@ def create_app(testing: bool = False) -> Flask:
     # el objeto puede ser recolectado y los decoradores @limiter.limit fallan.
     app.extensions["ecommerce_limiter"] = limiter
 
-    with app.app_context():
-        db.create_all()
+    if testing:
+        # En tests usamos SQLite en memoria: más simple que correr migraciones.
+        # En producción el esquema lo crean las migraciones (ver migrations/),
+        # no create_all(), para poder versionar y revertir cambios de esquema.
+        with app.app_context():
+            db.create_all()
 
     register_routes(app, limiter)
     return app

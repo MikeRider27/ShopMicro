@@ -5,6 +5,7 @@ __pycache__/
 .env
 .env.local
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 *.egg-info/

@@ -4,6 +4,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_migrate import Migrate
 
 from config import build_config
 from models import Category, Product, db
@@ -58,6 +59,7 @@ def create_app(testing: bool = False) -> Flask:
     app.config.update(config)
 
     db.init_app(app)
+    Migrate(app, db)
     CORS(app, origins=config["CORS_ORIGINS"])
 
     limiter = Limiter(
@@ -68,10 +70,19 @@ def create_app(testing: bool = False) -> Flask:
     )
     app.extensions["ecommerce_limiter"] = limiter
 
-    with app.app_context():
-        db.create_all()
-        if not testing:
-            seed_if_empty()
+    if testing:
+        # En producción el esquema lo crean las migraciones (ver migrations/)
+        # y el seed se dispara aparte con `flask seed` (ver entrypoint.sh),
+        # porque en este punto (construcción del app) las tablas todavía no
+        # existen si migrate no corrió antes.
+        with app.app_context():
+            db.create_all()
+
+    @app.cli.command("seed")
+    def seed_command():
+        """Siembra el catálogo de ejemplo si la tabla de productos está vacía."""
+        seed_if_empty()
+        print("Seed OK")
 
     register_routes(app, limiter)
     return app

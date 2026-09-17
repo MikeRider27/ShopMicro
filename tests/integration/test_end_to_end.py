@@ -115,9 +115,17 @@ def test_order_rejected_without_auth():
     assert resp.status_code == 401
 
 
+def _login(user):
+    resp = requests.post(
+        f"{GATEWAY_URL}/api/auth/login",
+        json={"email": user["email"], "password": user["password"]},
+        timeout=TIMEOUT,
+    )
+    return resp.json()["access_token"]
+
+
 def test_order_rejected_without_idempotency_key(new_user):
-    resp = requests.post(f"{GATEWAY_URL}/api/auth/login", json=new_user, timeout=TIMEOUT)
-    token = resp.json()["access_token"]
+    token = _login(new_user)
 
     resp = requests.post(
         f"{GATEWAY_URL}/api/orders/orders",
@@ -129,8 +137,7 @@ def test_order_rejected_without_idempotency_key(new_user):
 
 
 def test_order_rejected_when_stock_insufficient(new_user):
-    resp = requests.post(f"{GATEWAY_URL}/api/auth/login", json=new_user, timeout=TIMEOUT)
-    token = resp.json()["access_token"]
+    token = _login(new_user)
 
     resp = requests.get(f"{GATEWAY_URL}/api/products/products", timeout=TIMEOUT)
     product = resp.json()["products"][0]

@@ -41,6 +41,39 @@ def test_create_product_negative_price(client):
     assert resp.status_code == 400
 
 
+def test_create_product_negative_stock(client):
+    resp = client.post(
+        "/products", json={"name": "X", "price": 1, "stock": -1}, headers=ADMIN_HEADERS
+    )
+    assert resp.status_code == 400
+
+
+def test_create_product_non_numeric_price(client):
+    resp = client.post(
+        "/products", json={"name": "X", "price": "gratis"}, headers=ADMIN_HEADERS
+    )
+    assert resp.status_code == 400
+
+
+def test_create_product_rejects_unknown_fields(client):
+    resp = client.post(
+        "/products",
+        json={"name": "X", "price": 1, "sku": "ABC-123"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 400
+    assert "sku" in resp.get_json()["details"]
+
+
+def test_create_product_unknown_category(client):
+    resp = client.post(
+        "/products",
+        json={"name": "X", "price": 1, "category_id": 999},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 400
+
+
 def test_get_product_not_found(client):
     resp = client.get("/products/999")
     assert resp.status_code == 404
@@ -65,6 +98,28 @@ def test_update_product_success(client, sample_product):
     )
     assert resp.status_code == 200
     assert resp.get_json()["product"]["stock"] == 1
+
+
+def test_update_product_partial_does_not_reset_other_fields(client, sample_product):
+    """Actualizar solo el stock no debe pisar name/description con defaults."""
+    resp = client.put(
+        f"/products/{sample_product['id']}",
+        json={"stock": 7},
+        headers=ADMIN_HEADERS,
+    )
+    updated = resp.get_json()["product"]
+    assert updated["name"] == sample_product["name"]
+    assert updated["description"] == sample_product["description"]
+    assert updated["stock"] == 7
+
+
+def test_update_product_negative_price(client, sample_product):
+    resp = client.put(
+        f"/products/{sample_product['id']}",
+        json={"price": -1},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 400
 
 
 def test_delete_product_success(client, sample_product):
@@ -99,6 +154,27 @@ def test_reserve_stock_unknown_product(client):
         "/internal/reserve-stock", json=[{"product_id": 999, "quantity": 1}]
     )
     assert resp.status_code == 404
+
+
+def test_reserve_stock_rejects_malformed_item(client, sample_product):
+    resp = client.post(
+        "/internal/reserve-stock",
+        json=[{"product_id": sample_product["id"], "quantity": "muchas"}],
+    )
+    assert resp.status_code == 400
+
+
+def test_reserve_stock_rejects_zero_quantity(client, sample_product):
+    resp = client.post(
+        "/internal/reserve-stock",
+        json=[{"product_id": sample_product["id"], "quantity": 0}],
+    )
+    assert resp.status_code == 400
+
+
+def test_reserve_stock_rejects_empty_list(client):
+    resp = client.post("/internal/reserve-stock", json=[])
+    assert resp.status_code == 400
 
 
 def test_release_stock_restores_quantity(client, sample_product):

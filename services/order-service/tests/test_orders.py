@@ -56,6 +56,38 @@ def test_create_order_missing_address(client, auth_headers):
     assert resp.status_code == 400
 
 
+def test_create_order_whitespace_only_address(client, auth_headers):
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "   "},
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 400
+
+
+def test_create_order_negative_quantity(client, auth_headers):
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": -1}], "shipping_address": "Calle 1"},
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 400
+
+
+def test_create_order_rejects_unknown_fields(client, auth_headers):
+    resp = client.post(
+        "/orders",
+        json={
+            "items": [{"product_id": 1, "quantity": 1}],
+            "shipping_address": "Calle 1",
+            "total": 0,
+        },
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 400
+    assert "total" in resp.get_json()["details"]
+
+
 def test_create_order_invalid_item_shape(client, auth_headers):
     resp = client.post(
         "/orders",

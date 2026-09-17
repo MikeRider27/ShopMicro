@@ -5,9 +5,29 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
+from marshmallow import ValidationError
 
 from config import build_config
 from models import Category, Product, db
+from schemas import ProductCreateSchema, ProductUpdateSchema, StockItemSchema
+
+
+def parse_json(schema, **load_kwargs):
+    try:
+        return schema.load(request.get_json(silent=True) or {}, **load_kwargs), None
+    except ValidationError as err:
+        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
+
+
+def parse_json_list(schema):
+    """Para endpoints cuyo body es una lista plana (reserve/release-stock)."""
+    items = request.get_json(silent=True)
+    if not isinstance(items, list) or not items:
+        return None, (jsonify(error="se requiere una lista de items"), 400)
+    try:
+        return schema.load(items, many=True), None
+    except ValidationError as err:
+        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
 
 SEED_CATEGORIES = ["Electrónica", "Ropa", "Hogar", "Libros"]
 SEED_PRODUCTS = [
@@ -125,28 +145,23 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     def create_product():
         if not require_admin():
             return jsonify(error="no autorizado"), 403
-        data = request.get_json(silent=True) or {}
-        required = ("name", "price")
-        if not all(data.get(f) not in (None, "") for f in required):
-            return jsonify(error="name y price son requeridos"), 400
-        try:
-            price = float(data["price"])
-            stock = int(data.get("stock", 0))
-        except (TypeError, ValueError):
-            return jsonify(error="price y stock deben ser numéricos"), 400
-        if price < 0 or stock < 0:
-            return jsonify(error="price y stock no pueden ser negativos"), 400
+
+        payload, error = parse_json(ProductCreateSchema())
+        if error:
+            return error
 
         category = None
-        if data.get("category_id"):
-            category = db.session.get(Category, data["category_id"])
+        if payload.get("category_id") is not None:
+            category = db.session.get(Category, payload["category_id"])
+            if not category:
+                return jsonify(error=f"categoría {payload['category_id']} no existe"), 400
 
         product = Product(
-            name=data["name"],
-            description=data.get("description", ""),
-            price=price,
-            stock=stock,
-            image_url=data.get("image_url", ""),
+            name=payload["name"],
+            description=payload["description"],
+            price=payload["price"],
+            stock=payload["stock"],
+            image_url=payload["image_url"],
             category=category,
         )
         db.session.add(product)
@@ -162,23 +177,19 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
         if not product:
             return jsonify(error="producto no encontrado"), 404
 
-        data = request.get_json(silent=True) or {}
-        if "price" in data or "stock" in data:
-            try:
-                if "price" in data:
-                    data["price"] = float(data["price"])
-                if "stock" in data:
-                    data["stock"] = int(data["stock"])
-            except (TypeError, ValueError):
-                return jsonify(error="price y stock deben ser numéricos"), 400
-            if data.get("price", 0) < 0 or data.get("stock", 0) < 0:
-                return jsonify(error="price y stock no pueden ser negativos"), 400
+        payload, error = parse_json(ProductUpdateSchema())
+        if error:
+            return error
+
+        if "category_id" in payload:
+            category_id = payload["category_id"]
+            if category_id is not None and not db.session.get(Category, category_id):
+                return jsonify(error=f"categoría {category_id} no existe"), 400
+            product.category_id = category_id
 
         for field in ("name", "description", "price", "stock", "image_url"):
-            if field in data:
-                setattr(product, field, data[field])
-        if "category_id" in data:
-            product.category_id = data["category_id"]
+            if field in payload:
+                setattr(product, field, payload[field])
 
         db.session.commit()
         return jsonify(product=product.to_dict())
@@ -198,18 +209,16 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/internal/reserve-stock")
     def reserve_stock():
         """Usado por order-service para validar y descontar stock al crear un pedido."""
-        items = request.get_json(silent=True) or []
-        if not isinstance(items, list) or not items:
-            return jsonify(error="se requiere una lista de items"), 400
+        items, error = parse_json_list(StockItemSchema())
+        if error:
+            return error
 
         products_by_id = {}
         for item in items:
-            product = db.session.get(Product, item.get("product_id"))
+            product = db.session.get(Product, item["product_id"])
             if not product:
-                return jsonify(error=f"producto {item.get('product_id')} no existe"), 404
-            quantity = int(item.get("quantity", 0))
-            if quantity <= 0:
-                return jsonify(error="quantity debe ser mayor a 0"), 400
+                return jsonify(error=f"producto {item['product_id']} no existe"), 404
+            quantity = item["quantity"]
             if product.stock < quantity:
                 return jsonify(error=f"stock insuficiente para '{product.name}'"), 409
             products_by_id[product.id] = (product, quantity)
@@ -236,20 +245,19 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
         cuyo producto ya no exista (mejor-esfuerzo: no tiene sentido fallar
         una compensación).
         """
-        items = request.get_json(silent=True) or []
-        if not isinstance(items, list) or not items:
-            return jsonify(error="se requiere una lista de items"), 400
+        items, error = parse_json_list(StockItemSchema())
+        if error:
+            return error
 
         released = []
         skipped = []
         for item in items:
-            product = db.session.get(Product, item.get("product_id"))
-            quantity = int(item.get("quantity", 0))
-            if not product or quantity <= 0:
-                skipped.append(item.get("product_id"))
+            product = db.session.get(Product, item["product_id"])
+            if not product:
+                skipped.append(item["product_id"])
                 continue
-            product.stock += quantity
-            released.append({"product_id": product.id, "quantity": quantity})
+            product.stock += item["quantity"]
+            released.append({"product_id": product.id, "quantity": item["quantity"]})
         db.session.commit()
 
         return jsonify(released=released, skipped=skipped)

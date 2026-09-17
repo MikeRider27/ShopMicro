@@ -6,10 +6,12 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
 from flask_migrate import Migrate
+from marshmallow import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from config import build_config
 from models import Order, OrderItem, db
+from schemas import CreateOrderSchema
 
 PRODUCT_SERVICE_TIMEOUT_SECONDS = 10
 
@@ -63,17 +65,16 @@ def register_routes(app: Flask) -> None:
     @jwt_required()
     def create_order():
         user_id = int(get_jwt_identity())
-        data = request.get_json(silent=True) or {}
-        items = data.get("items") or []
-        shipping_address = (data.get("shipping_address") or "").strip()
         idempotency_key = request.headers.get("Idempotency-Key", "").strip()
-
         if not idempotency_key:
             return jsonify(error="el header Idempotency-Key es requerido"), 400
-        if not isinstance(items, list) or not items:
-            return jsonify(error="el pedido debe tener al menos un item"), 400
-        if not shipping_address:
-            return jsonify(error="shipping_address es requerido"), 400
+
+        try:
+            payload = CreateOrderSchema().load(request.get_json(silent=True) or {})
+        except ValidationError as err:
+            return jsonify(error="datos inválidos", details=err.messages), 400
+
+        shipping_address = payload["shipping_address"]
 
         # Idempotencia: si ya procesamos este intento (mismo usuario + key),
         # devolvemos el pedido existente en vez de reservar stock de nuevo.
@@ -81,13 +82,10 @@ def register_routes(app: Flask) -> None:
         if existing:
             return jsonify(order=existing.to_dict()), 200
 
-        reserve_payload = []
-        for item in items:
-            product_id = item.get("product_id")
-            quantity = item.get("quantity")
-            if not isinstance(product_id, int) or not isinstance(quantity, int) or quantity <= 0:
-                return jsonify(error="cada item requiere product_id y quantity (entero positivo)"), 400
-            reserve_payload.append({"product_id": product_id, "quantity": quantity})
+        reserve_payload = [
+            {"product_id": item["product_id"], "quantity": item["quantity"]}
+            for item in payload["items"]
+        ]
 
         try:
             resp = requests.post(

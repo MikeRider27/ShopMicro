@@ -11,9 +11,25 @@ from flask_jwt_extended import (
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
+from marshmallow import ValidationError
 
 from config import build_config
 from models import User, db
+from schemas import LoginSchema, RegisterSchema
+
+
+def parse_json(schema):
+    """Valida el body JSON contra un schema de marshmallow.
+
+    Devuelve (payload, None) si es válido, o (None, (response, 400)) con el
+    detalle de los errores por campo si no lo es. Rechaza tipos incorrectos,
+    campos faltantes y campos desconocidos (unknown="raise", el default de
+    marshmallow) antes de tocar la base de datos.
+    """
+    try:
+        return schema.load(request.get_json(silent=True) or {}), None
+    except ValidationError as err:
+        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
 
 
 def create_app(testing: bool = False) -> Flask:
@@ -55,20 +71,18 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/register")
     @limiter.limit("10 per minute")
     def register():
-        data = request.get_json(silent=True) or {}
-        email = (data.get("email") or "").strip().lower()
-        password = data.get("password") or ""
-        name = (data.get("name") or "").strip()
+        payload, error = parse_json(RegisterSchema())
+        if error:
+            return error
 
-        if not email or not password or not name:
-            return jsonify(error="email, password y name son requeridos"), 400
-        if len(password) < 6:
-            return jsonify(error="la contraseña debe tener al menos 6 caracteres"), 400
+        email = payload["email"].strip().lower()
+        name = payload["name"].strip()
+
         if User.query.filter_by(email=email).first():
             return jsonify(error="el email ya está registrado"), 409
 
         user = User(email=email, name=name)
-        user.set_password(password)
+        user.set_password(payload["password"])
         db.session.add(user)
         db.session.commit()
 
@@ -78,12 +92,13 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/login")
     @limiter.limit("10 per minute")
     def login():
-        data = request.get_json(silent=True) or {}
-        email = (data.get("email") or "").strip().lower()
-        password = data.get("password") or ""
+        payload, error = parse_json(LoginSchema())
+        if error:
+            return error
 
+        email = payload["email"].strip().lower()
         user = User.query.filter_by(email=email).first()
-        if not user or not user.check_password(password):
+        if not user or not user.check_password(payload["password"]):
             return jsonify(error="credenciales inválidas"), 401
 
         token = create_access_token(identity=str(user.id))

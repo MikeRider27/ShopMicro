@@ -143,6 +143,15 @@ GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 - **Compensación:** si `product-service` ya descontó el stock pero `order-service` falla al guardar el pedido (DB caída, excepción inesperada), se llama a `POST /internal/release-stock` para devolver esa reserva antes de responder el error. Es *best-effort*: si esa llamada de compensación también falla, se loguea y el inventario queda inconsistente hasta una reconciliación manual — no hay reintentos automáticos ni cola de compensación pendiente todavía.
 - **Por qué no arquitectura orientada a eventos:** un bus de eventos (outbox + broker) daría garantías más fuertes (reintentos, at-least-once, auditoría), pero suma un componente de infraestructura más, consistencia eventual en la UI, y complejidad operativa que no se justifica en este tamaño de proyecto. La combinación reserva síncrona + Idempotency-Key + compensación cubre los casos reales (reintento del cliente, caída puntual de un servicio) con mucho menos costo. Si el sistema creciera a más microservicios o necesitara desacoplar mejor los fallos, valdría la pena reevaluarlo.
 
+## Validación de requests
+
+Los tres microservicios validan el body de sus endpoints de escritura con [Marshmallow](https://marshmallow.readthedocs.io/) (`schemas.py` en cada servicio) en vez de `if`s sueltos:
+
+- **Tipos y rangos:** `email` con formato válido (auth-service), `price`/`stock` numéricos y no negativos, `quantity`/`product_id` enteros positivos (product-service, order-service).
+- **Campos arbitrarios rechazados:** marshmallow usa `unknown="raise"` por default — mandar un campo no declarado (ej. `is_admin` en un registro, o `total` en la creación de un pedido) devuelve `400` en vez de ignorarse silenciosamente.
+- **Antes de tocar la base o a otro servicio:** la validación corre primero; recién si pasa se consulta la base de datos o se llama a `product-service`.
+- Los errores de validación devuelven `{"error": "datos inválidos", "details": {...}}` con el detalle por campo que da marshmallow.
+
 ## Notas de diseño / simplificaciones
 
 - Cada microservicio usa su propia base de datos dentro del mismo Postgres (aislamiento lógico, sin compartir tablas).
@@ -151,7 +160,7 @@ GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: manejo de errores global consistente (formato `{error:{code,message,details}}` con handlers para 401/403/404/409/422/500/503), correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

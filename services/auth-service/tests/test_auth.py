@@ -35,6 +35,30 @@ def test_register_duplicate_email(client):
     assert resp.status_code == 409
 
 
+def test_register_invalid_email_format(client):
+    resp = register(client, email="no-es-un-email")
+    assert resp.status_code == 400
+
+
+def test_register_whitespace_only_name(client):
+    resp = register(client, name="   ")
+    assert resp.status_code == 400
+
+
+def test_register_rejects_unknown_fields(client):
+    resp = client.post(
+        "/register",
+        json={
+            "email": "user@example.com",
+            "password": "secret123",
+            "name": "Test User",
+            "is_admin": True,
+        },
+    )
+    assert resp.status_code == 400
+    assert "is_admin" in resp.get_json()["details"]
+
+
 def test_login_success(client):
     register(client)
     resp = client.post(

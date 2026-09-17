@@ -65,11 +65,16 @@ export const api = {
   // Orders
   createOrder: (
     payload: { items: { product_id: number; quantity: number }[]; shipping_address: string },
-    token: string
+    token: string,
+    idempotencyKey: string
   ) =>
     request<{ order: Order }>(
       "/api/orders/orders",
-      { method: "POST", body: JSON.stringify(payload) },
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
       token
     ),
   listOrders: (token: string) => request<{ orders: Order[] }>("/api/orders/orders", {}, token),

@@ -14,6 +14,11 @@ export default function CheckoutPage() {
   const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Se genera una vez por "intento de compra": si el pedido falla y el
+  // usuario reintenta con el mismo carrito, reutilizamos la misma key para
+  // que el backend detecte el reintento y no cree ni cobre el pedido dos
+  // veces (ver Idempotency-Key en order-service).
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
 
   if (!user || !token) {
     return (
@@ -40,7 +45,8 @@ export default function CheckoutPage() {
           items: items.map((i) => ({ product_id: i.product.id, quantity: i.quantity })),
           shipping_address: address,
         },
-        token
+        token,
+        idempotencyKey
       );
       clear();
       router.push(`/orders?confirmed=${order.id}`);

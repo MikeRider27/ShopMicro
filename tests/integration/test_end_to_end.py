@@ -60,13 +60,14 @@ def test_full_purchase_flow(new_user):
     stock_before = product["stock"]
 
     # 3. Crear pedido (order-service -> reserva de stock en product-service)
+    idempotency_key = uuid.uuid4().hex
     resp = requests.post(
         f"{GATEWAY_URL}/api/orders/orders",
         json={
             "items": [{"product_id": product["id"], "quantity": 1}],
             "shipping_address": "Dirección de prueba de integración",
         },
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": idempotency_key},
         timeout=TIMEOUT,
     )
     assert resp.status_code == 201, resp.text
@@ -86,14 +87,45 @@ def test_full_purchase_flow(new_user):
     order_ids = [o["id"] for o in resp.json()["orders"]]
     assert order["id"] in order_ids
 
+    # 6. Reenviar la misma request con la misma key no debe crear un segundo
+    #    pedido ni descontar stock de nuevo (idempotencia).
+    resp = requests.post(
+        f"{GATEWAY_URL}/api/orders/orders",
+        json={
+            "items": [{"product_id": product["id"], "quantity": 1}],
+            "shipping_address": "Dirección de prueba de integración",
+        },
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": idempotency_key},
+        timeout=TIMEOUT,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["order"]["id"] == order["id"]
+
+    resp = requests.get(f"{GATEWAY_URL}/api/products/products/{product['id']}", timeout=TIMEOUT)
+    assert resp.json()["product"]["stock"] == stock_before - 1
+
 
 def test_order_rejected_without_auth():
     resp = requests.post(
         f"{GATEWAY_URL}/api/orders/orders",
         json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "x"},
+        headers={"Idempotency-Key": uuid.uuid4().hex},
         timeout=TIMEOUT,
     )
     assert resp.status_code == 401
+
+
+def test_order_rejected_without_idempotency_key(new_user):
+    resp = requests.post(f"{GATEWAY_URL}/api/auth/login", json=new_user, timeout=TIMEOUT)
+    token = resp.json()["access_token"]
+
+    resp = requests.post(
+        f"{GATEWAY_URL}/api/orders/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "x"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=TIMEOUT,
+    )
+    assert resp.status_code == 400
 
 
 def test_order_rejected_when_stock_insufficient(new_user):
@@ -109,7 +141,7 @@ def test_order_rejected_when_stock_insufficient(new_user):
             "items": [{"product_id": product["id"], "quantity": 999999}],
             "shipping_address": "x",
         },
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {token}", "Idempotency-Key": uuid.uuid4().hex},
         timeout=TIMEOUT,
     )
     assert resp.status_code == 409

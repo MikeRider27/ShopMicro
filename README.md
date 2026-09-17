@@ -60,7 +60,7 @@ Postgres crea automáticamente las 3 bases de datos la primera vez que arranca (
 | products | GET | `/api/products/products/<id>` | Detalle de producto |
 | products | GET | `/api/products/categories` | Listar categorías |
 | products | POST/PUT/DELETE | `/api/products/products` | Admin (header `X-Admin-Key`, ver `ADMIN_API_KEY`) |
-| orders | POST | `/api/orders/orders` | Crear pedido (requiere JWT) |
+| orders | POST | `/api/orders/orders` | Crear pedido (requiere JWT y header `Idempotency-Key`) |
 | orders | GET | `/api/orders/orders` | Historial del usuario autenticado |
 
 ## Datos de demo adicionales
@@ -135,16 +135,23 @@ GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 - Rate limiting (Flask-Limiter + Redis) en `/register`, `/login` (10/min) y en los endpoints de administración de productos (20/min). Redis es necesario porque cada servicio corre con 2 workers de gunicorn y un límite en memoria no sería consistente entre procesos.
 - JWT con expiración configurable (`JWT_ACCESS_TOKEN_EXPIRES_MINUTES`, default 60 min). Se evaluó agregar refresh tokens; se dejó fuera de este alcance por simplicidad — el frontend simplemente pide login de nuevo cuando el token expira (ver manejo de 401 en `frontend/lib/api.ts`).
 
+## Consistencia entre order-service y product-service
+
+`order-service` no comparte base de datos con `product-service` (cada uno tiene la suya), así que crear un pedido implica una operación distribuida en dos pasos: reservar stock allá, guardar el pedido acá. Sin cuidado extra eso puede dejar inconsistencias, así que:
+
+- **Idempotencia:** `POST /orders` exige un header `Idempotency-Key` (el frontend genera un UUID por intento de compra, ver `frontend/app/checkout/page.tsx`). Si dos requests llegan con la misma key (reintento de red, doble click), la segunda devuelve el pedido ya creado (`200`) en vez de reservar stock y cobrar dos veces.
+- **Compensación:** si `product-service` ya descontó el stock pero `order-service` falla al guardar el pedido (DB caída, excepción inesperada), se llama a `POST /internal/release-stock` para devolver esa reserva antes de responder el error. Es *best-effort*: si esa llamada de compensación también falla, se loguea y el inventario queda inconsistente hasta una reconciliación manual — no hay reintentos automáticos ni cola de compensación pendiente todavía.
+- **Por qué no arquitectura orientada a eventos:** un bus de eventos (outbox + broker) daría garantías más fuertes (reintentos, at-least-once, auditoría), pero suma un componente de infraestructura más, consistencia eventual en la UI, y complejidad operativa que no se justifica en este tamaño de proyecto. La combinación reserva síncrona + Idempotency-Key + compensación cubre los casos reales (reintento del cliente, caída puntual de un servicio) con mucho menos costo. Si el sistema creciera a más microservicios o necesitara desacoplar mejor los fallos, valdría la pena reevaluarlo.
+
 ## Notas de diseño / simplificaciones
 
 - Cada microservicio usa su propia base de datos dentro del mismo Postgres (aislamiento lógico, sin compartir tablas).
-- `order-service` llama a `product-service` (`/internal/reserve-stock`) para validar y descontar stock de forma síncrona al crear un pedido. **Limitación conocida:** si `order-service` falla al guardar el pedido después de que `product-service` ya descontó el stock, el stock no se libera automáticamente (no hay compensación/saga todavía) — queda documentado como mejora pendiente.
 - La escritura del catálogo (`POST/PUT/DELETE /products`) está protegida por un header simple `X-Admin-Key` (variable `ADMIN_API_KEY`), pensado para administración interna, no para el frontend público.
 - El carrito de compras vive en el cliente (localStorage), no hay carrito persistido en base de datos.
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: idempotencia y compensación de stock, validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: validación estructurada de requests (Marshmallow/Pydantic), manejo de errores global consistente, correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

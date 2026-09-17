@@ -10,6 +10,7 @@ class Order(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False, index=True)
+    idempotency_key = db.Column(db.String(100), nullable=False, unique=True, index=True)
     status = db.Column(db.String(30), default="paid", nullable=False)
     total = db.Column(db.Numeric(10, 2), nullable=False)
     shipping_address = db.Column(db.String(500), default="")

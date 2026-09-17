@@ -1,3 +1,4 @@
+import logging
 import os
 
 import requests
@@ -5,11 +6,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
 from flask_migrate import Migrate
+from sqlalchemy.exc import IntegrityError
 
 from config import build_config
 from models import Order, OrderItem, db
 
 PRODUCT_SERVICE_TIMEOUT_SECONDS = 10
+
+logger = logging.getLogger("order-service")
 
 
 def create_app(testing: bool = False) -> Flask:
@@ -36,6 +40,25 @@ def register_routes(app: Flask) -> None:
     def health():
         return jsonify(status="ok", service="order-service")
 
+    def _release_stock(items: list) -> None:
+        """Compensación: intenta devolver stock ya reservado. Best-effort:
+        si product-service tampoco responde acá, solo se loguea — queda
+        inventario "perdido" hasta una reconciliación manual, documentado
+        como limitación conocida (ver README)."""
+        payload = [
+            {"product_id": i["product_id"], "quantity": i["quantity"]} for i in items
+        ]
+        try:
+            resp = requests.post(
+                f"{app.config['PRODUCT_SERVICE_URL']}/internal/release-stock",
+                json=payload,
+                timeout=PRODUCT_SERVICE_TIMEOUT_SECONDS,
+            )
+            if resp.status_code != 200:
+                logger.error("Falló la compensación de stock: %s", resp.text)
+        except requests.RequestException:
+            logger.exception("product-service no disponible al compensar stock: %s", payload)
+
     @app.post("/orders")
     @jwt_required()
     def create_order():
@@ -43,11 +66,20 @@ def register_routes(app: Flask) -> None:
         data = request.get_json(silent=True) or {}
         items = data.get("items") or []
         shipping_address = (data.get("shipping_address") or "").strip()
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
 
+        if not idempotency_key:
+            return jsonify(error="el header Idempotency-Key es requerido"), 400
         if not isinstance(items, list) or not items:
             return jsonify(error="el pedido debe tener al menos un item"), 400
         if not shipping_address:
             return jsonify(error="shipping_address es requerido"), 400
+
+        # Idempotencia: si ya procesamos este intento (mismo usuario + key),
+        # devolvemos el pedido existente en vez de reservar stock de nuevo.
+        existing = Order.query.filter_by(user_id=user_id, idempotency_key=idempotency_key).first()
+        if existing:
+            return jsonify(order=existing.to_dict()), 200
 
         reserve_payload = []
         for item in items:
@@ -73,7 +105,13 @@ def register_routes(app: Flask) -> None:
         reserved_items = resp.json()["items"]
         total = sum(i["unit_price"] * i["quantity"] for i in reserved_items)
 
-        order = Order(user_id=user_id, total=total, shipping_address=shipping_address, status="paid")
+        order = Order(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            total=total,
+            shipping_address=shipping_address,
+            status="paid",
+        )
         for item in reserved_items:
             order.items.append(
                 OrderItem(
@@ -83,8 +121,29 @@ def register_routes(app: Flask) -> None:
                     quantity=item["quantity"],
                 )
             )
-        db.session.add(order)
-        db.session.commit()
+
+        try:
+            db.session.add(order)
+            db.session.commit()
+        except IntegrityError:
+            # Carrera: dos requests con la misma key llegaron casi juntas y
+            # ambas pasaron el chequeo de arriba. El stock ya se reservó dos
+            # veces; se libera esta reserva duplicada y se devuelve el pedido
+            # que sí quedó guardado.
+            db.session.rollback()
+            _release_stock(reserved_items)
+            existing = Order.query.filter_by(user_id=user_id, idempotency_key=idempotency_key).first()
+            if existing:
+                return jsonify(order=existing.to_dict()), 200
+            return jsonify(error="conflicto al guardar el pedido, reintentá"), 409
+        except Exception:
+            # Cualquier falla acá (DB caída, timeout, bug) deja stock
+            # reservado sin pedido asociado si no compensamos: por eso el
+            # except es deliberadamente amplio, no solo errores de SQLAlchemy.
+            db.session.rollback()
+            logger.exception("Falló al guardar el pedido tras reservar stock, compensando...")
+            _release_stock(reserved_items)
+            return jsonify(error="no se pudo guardar el pedido, el stock reservado fue liberado"), 500
 
         return jsonify(order=order.to_dict()), 201
 

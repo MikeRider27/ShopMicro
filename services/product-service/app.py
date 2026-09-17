@@ -227,6 +227,33 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
 
         return jsonify(items=reserved)
 
+    @app.post("/internal/release-stock")
+    def release_stock():
+        """Compensación: devuelve stock previamente reservado.
+
+        Lo usa order-service cuando reservó stock aquí pero después falló al
+        guardar el pedido, para no perder inventario. Es tolerante a items
+        cuyo producto ya no exista (mejor-esfuerzo: no tiene sentido fallar
+        una compensación).
+        """
+        items = request.get_json(silent=True) or []
+        if not isinstance(items, list) or not items:
+            return jsonify(error="se requiere una lista de items"), 400
+
+        released = []
+        skipped = []
+        for item in items:
+            product = db.session.get(Product, item.get("product_id"))
+            quantity = int(item.get("quantity", 0))
+            if not product or quantity <= 0:
+                skipped.append(item.get("product_id"))
+                continue
+            product.stock += quantity
+            released.append({"product_id": product.id, "quantity": quantity})
+        db.session.commit()
+
+        return jsonify(released=released, skipped=skipped)
+
 
 app = create_app() if os.environ.get("TESTING") != "1" else None
 

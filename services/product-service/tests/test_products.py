@@ -99,3 +99,31 @@ def test_reserve_stock_unknown_product(client):
         "/internal/reserve-stock", json=[{"product_id": 999, "quantity": 1}]
     )
     assert resp.status_code == 404
+
+
+def test_release_stock_restores_quantity(client, sample_product):
+    client.post(
+        "/internal/reserve-stock",
+        json=[{"product_id": sample_product["id"], "quantity": 3}],
+    )
+    resp = client.post(
+        "/internal/release-stock",
+        json=[{"product_id": sample_product["id"], "quantity": 3}],
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["released"] == [
+        {"product_id": sample_product["id"], "quantity": 3}
+    ]
+
+    updated = client.get(f"/products/{sample_product['id']}").get_json()["product"]
+    assert updated["stock"] == sample_product["stock"]
+
+
+def test_release_stock_skips_unknown_product(client):
+    resp = client.post(
+        "/internal/release-stock", json=[{"product_id": 999, "quantity": 1}]
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["released"] == []
+    assert data["skipped"] == [999]

@@ -2,6 +2,18 @@ import type { Category, Order, Product, User } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
+export class ApiError extends Error {
+  code?: string;
+  status?: number;
+
+  constructor(message: string, code?: string, status?: number) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -19,12 +31,22 @@ async function request<T>(
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers, cache: "no-store" });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, { ...options, headers, cache: "no-store" });
+  } catch {
+    // fetch() rechaza por error de red (servidor caído, sin conexión, CORS),
+    // no por un status HTTP de error. Sin este catch, el mensaje que le
+    // llegaría al usuario sería el críptico "Failed to fetch".
+    throw new ApiError("No se pudo conectar con el servidor. Revisá tu conexión e intentá de nuevo.");
+  }
+
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
     if (res.status === 401 && token) {
-      // Sesión inválida o expirada: limpiar y forzar un nuevo login.
+      // Sesión inválida o expirada: limpiar y forzar un nuevo login,
+      // explicando por qué en vez de mandarlo en silencio a /login.
       try {
         localStorage.removeItem("token");
         localStorage.removeItem("user");
@@ -32,12 +54,12 @@ async function request<T>(
         // ignore
       }
       if (typeof window !== "undefined") {
-        window.location.href = "/login";
+        window.location.href = "/login?reason=session_expired";
       }
-      throw new Error("Tu sesión expiró. Inicia sesión de nuevo.");
+      throw new ApiError("Tu sesión expiró. Inicia sesión de nuevo.", "SESSION_EXPIRED", 401);
     }
-    const message = typeof data.error === "object" ? data.error?.message : data.error;
-    throw new Error(message || `Error ${res.status}`);
+    const errorBody = typeof data.error === "object" ? data.error : { message: data.error };
+    throw new ApiError(errorBody?.message || `Error ${res.status}`, errorBody?.code, res.status);
   }
   return data as T;
 }

@@ -125,11 +125,32 @@ pip install pytest requests
 GATEWAY_URL=http://localhost:8080 python -m pytest tests/integration -v
 ```
 
+**Frontend** — unitarios/componentes con Jest + React Testing Library:
+
+```bash
+cd frontend
+npm install
+npm test
+```
+
+Y una prueba E2E con Playwright que corre en un navegador real contra el stack completo (registro → productos → carrito → checkout → historial):
+
+```bash
+docker compose up -d
+cd frontend
+npm install
+npx playwright install --with-deps chromium   # una sola vez
+E2E_BASE_URL=http://localhost:3000 npm run test:e2e
+```
+
 ## CI/CD
 
 `.github/workflows/ci.yml` corre en cada push/PR a `main`:
 - **backend-tests**: lint (`ruff`) + `pytest` con cobertura para los 3 microservicios (matriz).
+- **frontend-tests**: tests unitarios/componentes del frontend con Jest.
 - **docker-build**: construye todas las imágenes con `docker compose build` para detectar errores de build temprano.
+
+La prueba E2E de Playwright no corre en CI (necesita el stack completo levantado con un navegador real); es para correr localmente o, más adelante, en un job aparte con `docker compose up` de por medio.
 
 ## Seguridad
 
@@ -153,6 +174,7 @@ Los tres microservicios validan el body de sus endpoints de escritura con [Marsh
 - **Tipos y rangos:** `email` con formato válido (auth-service), `price`/`stock` numéricos y no negativos, `quantity`/`product_id` enteros positivos (product-service, order-service).
 - **Campos arbitrarios rechazados:** marshmallow usa `unknown="raise"` por default — mandar un campo no declarado (ej. `is_admin` en un registro, o `total` en la creación de un pedido) devuelve `400` en vez de ignorarse silenciosamente.
 - **Antes de tocar la base o a otro servicio:** la validación corre primero; recién si pasa se consulta la base de datos o se llama a `product-service`.
+
 ## Manejo de errores
 
 Los tres microservicios devuelven todos sus errores con el mismo formato:
@@ -198,6 +220,16 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 - **Multi-stage build en el frontend:** `deps` → `builder` → `runner`; la imagen final no lleva `devDependencies` (TypeScript, Tailwind, etc.) ni el código fuente, solo el output standalone de Next.js.
 - **Limitación conocida:** `python:3.12.14-slim-bookworm` trae igual algunas vulnerabilidades reportadas a nivel de paquetes del SO (no de nuestro código) — es una realidad de cualquier imagen base Debian/Alpine, que requiere actualizarla periódicamente (ej. Dependabot/Renovate para PRs automáticos de rebuild), no algo que se resuelva de una vez.
 
+## Frontend
+
+- **Manejo de errores de API:** `lib/api.ts` distingue un error de red (`fetch()` rechaza — servidor caído, sin conexión) de un error HTTP del backend, con un `ApiError` tipado (`code`, `status`, `message`) en vez de mensajes crudos como "Failed to fetch".
+- **Estados de loading/éxito/error/vacío:** ya presentes en todas las páginas que hacen fetch (catálogo, detalle de producto, carrito, pedidos) — spinner de texto mientras carga, banner rojo en error, mensaje explícito cuando la lista está vacía ("Tu carrito está vacío", "Aún no tienes pedidos"), y confirmación en verde tras un pedido exitoso.
+- **Validación de formularios en el cliente** (`lib/validation.ts`): registro, login y checkout validan email/contraseña/dirección antes de llamar a la API — mismas reglas que los schemas de Marshmallow del backend (ver [Validación de requests](#validación-de-requests)), pero con feedback inmediato en vez de esperar el round-trip.
+- **Sesión y expiración:**
+  - Al cargar la app, si hay un token guardado se valida contra `GET /auth/me` en vez de confiar ciegamente en `localStorage` — si ya expiró, se detecta ahí mismo en vez de que el usuario se entere recién al intentar comprar algo.
+  - Cualquier 401 en un request autenticado limpia la sesión y redirige a `/login?reason=session_expired`, que muestra un aviso explicando por qué ("Tu sesión expiró, iniciá sesión de nuevo") en vez de un redirect silencioso.
+  - Cada visita a `/checkout` genera un `Idempotency-Key` propio (ver [Consistencia entre order-service y product-service](#consistencia-entre-order-service-y-product-service)).
+
 ## Notas de diseño / simplificaciones
 
 - Cada microservicio usa su propia base de datos dentro del mismo Postgres (aislamiento lógico, sin compartir tablas).
@@ -206,7 +238,7 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY). También quedan pendientes, mencionados por el plan de mejoras pero fuera de este alcance: un Prometheus/Grafana real scrapeando los `/metrics` (hoy solo se exponen), agregación centralizada de logs (hoy quedan en `docker compose logs`, no en un ELK/Loki), y actualización automática de imágenes base (Dependabot/Renovate).
+Mejoras identificadas y no incluidas todavía en este alcance: documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY). También quedan pendientes, mencionados por el plan de mejoras pero fuera de este alcance: un Prometheus/Grafana real scrapeando los `/metrics` (hoy solo se exponen), agregación centralizada de logs (hoy quedan en `docker compose logs`, no en un ELK/Loki), actualización automática de imágenes base (Dependabot/Renovate), y correr la prueba E2E de Playwright en CI (hoy es manual, necesita el stack completo levantado).
 
 ------------------------------------------------------------------------
 

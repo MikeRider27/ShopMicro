@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { validateRequired } from "@/lib/validation";
 import { useAuth } from "../components/AuthProvider";
 import { useCart } from "../components/CartProvider";
 
@@ -14,6 +15,7 @@ export default function CheckoutPage() {
   const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [addressError, setAddressError] = useState("");
   // Se genera una vez por "intento de compra": si el pedido falla y el
   // usuario reintenta con el mismo carrito, reutilizamos la misma key para
   // que el backend detecte el reintento y no cree ni cobre el pedido dos
@@ -38,6 +40,11 @@ export default function CheckoutPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+
+    const addressValidationError = validateRequired(address, "La dirección de envío");
+    setAddressError(addressValidationError || "");
+    if (addressValidationError) return;
+
     setLoading(true);
     try {
       const { order } = await api.createOrder(
@@ -76,16 +83,17 @@ export default function CheckoutPage() {
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
         <label className="text-sm font-medium text-gray-700">
           Dirección de envío
           <textarea
-            required
             value={address}
             onChange={(e) => setAddress(e.target.value)}
-            className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2"
+            aria-invalid={!!addressError}
+            className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 aria-[invalid=true]:border-red-400"
             rows={3}
           />
+          {addressError && <p className="mt-1 text-xs text-red-600">{addressError}</p>}
         </label>
 
         {error && <p className="rounded-md bg-red-50 p-3 text-sm text-red-600">{error}</p>}

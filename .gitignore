@@ -10,3 +10,7 @@ __pycache__/
 htmlcov/
 *.egg-info/
 ShopMicro_Lista_de_Mejoras.pdf
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/

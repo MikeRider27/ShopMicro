@@ -21,18 +21,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let savedToken: string | null = null;
+    let savedUser: User | null = null;
     try {
-      const savedToken = localStorage.getItem("token");
-      const savedUser = localStorage.getItem("user");
-      if (savedToken && savedUser) {
-        setToken(savedToken);
-        setUser(JSON.parse(savedUser));
-      }
+      savedToken = localStorage.getItem("token");
+      const rawUser = localStorage.getItem("user");
+      savedUser = rawUser ? JSON.parse(rawUser) : null;
     } catch {
       // localStorage no disponible
-    } finally {
-      setLoading(false);
     }
+
+    if (!savedToken || !savedUser) {
+      setLoading(false);
+      return;
+    }
+
+    // No confiamos ciegamente en lo guardado: si el token ya expiró (la
+    // pestaña quedó abierta más de JWT_ACCESS_TOKEN_EXPIRES_MINUTES), lo
+    // detectamos acá en vez de que el usuario vea el navbar como
+    // "logueado" y recién se entere al intentar comprar algo. api.me()
+    // dispara el mismo flujo de "sesión expirada" que cualquier otra
+    // llamada autenticada (ver lib/api.ts) si el token ya no es válido.
+    setToken(savedToken);
+    setUser(savedUser);
+    api
+      .me(savedToken)
+      .catch(() => {
+        // El 401 ya disparó la limpieza + redirect en lib/api.ts.
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const persist = (newToken: string, newUser: User) => {

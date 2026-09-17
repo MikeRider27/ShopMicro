@@ -21,6 +21,16 @@ def test_health(client):
     assert resp.status_code == 200
 
 
+def test_request_id_is_generated_when_missing(client):
+    resp = client.get("/health")
+    assert resp.headers.get("X-Request-ID")
+
+
+def test_request_id_is_echoed_when_provided(client):
+    resp = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    assert resp.headers.get("X-Request-ID") == "abc-123"
+
+
 def test_create_order_requires_auth(client):
     resp = client.post(
         "/orders",
@@ -143,6 +153,59 @@ def test_create_order_product_service_unavailable(mock_post, client, auth_header
         headers=with_key(auth_headers),
     )
     assert resp.status_code == 503
+
+
+@patch("app.time.sleep")
+@patch("app.requests.post")
+def test_create_order_retries_on_connection_error(mock_post, mock_sleep, client, auth_headers):
+    """ConnectionError es seguro de reintentar: el request nunca llegó a
+    product-service. Acá falla dos veces y al tercer intento responde bien."""
+    success = FakeResponse(
+        200,
+        {"items": [{"product_id": 1, "name": "Producto", "unit_price": 10.0, "quantity": 1}]},
+    )
+    mock_post.side_effect = [
+        requests.exceptions.ConnectionError("refused"),
+        requests.exceptions.ConnectionError("refused"),
+        success,
+    ]
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "Calle 1"},
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 201
+    assert mock_post.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch("app.time.sleep")
+@patch("app.requests.post")
+def test_create_order_gives_up_after_max_connection_retries(mock_post, mock_sleep, client, auth_headers):
+    mock_post.side_effect = requests.exceptions.ConnectionError("refused")
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "Calle 1"},
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 503
+    # MAX_CONNECTION_RETRIES=2 -> intento inicial + 2 reintentos = 3 llamadas.
+    assert mock_post.call_count == 3
+
+
+@patch("app.requests.post")
+def test_create_order_does_not_retry_on_read_timeout(mock_post, client, auth_headers):
+    """Un timeout de lectura NO se reintenta: el request pudo haber llegado
+    y procesado del lado de product-service; reintentar arriesgaría reservar
+    stock dos veces (reserve-stock no es idempotente)."""
+    mock_post.side_effect = requests.exceptions.ReadTimeout("too slow")
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "Calle 1"},
+        headers=with_key(auth_headers),
+    )
+    assert resp.status_code == 503
+    assert mock_post.call_count == 1
 
 
 @patch("app.requests.post")

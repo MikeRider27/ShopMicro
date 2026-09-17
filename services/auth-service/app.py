@@ -14,6 +14,7 @@ from flask_migrate import Migrate
 
 from config import build_config
 from errors import error_response, register_error_handlers
+from middleware import register_request_id
 from models import User, db
 from schemas import LoginSchema, RegisterSchema
 
@@ -29,6 +30,7 @@ def create_app(testing: bool = False) -> Flask:
     CORS(app, origins=config["CORS_ORIGINS"])
     register_error_handlers(app)
     register_jwt_error_handlers(jwt)
+    register_request_id(app, "auth-service")
 
     limiter = Limiter(
         key_func=get_remote_address,

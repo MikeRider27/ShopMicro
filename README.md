@@ -167,6 +167,16 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 - Errores de negocio tienen su propio code (`EMAIL_ALREADY_REGISTERED`, `INSUFFICIENT_STOCK`, `INVALID_ADMIN_KEY`, `ORDER_NOT_FOUND`, etc.), así el frontend (o cualquier consumidor de la API) puede reaccionar a un `code` en vez de parsear el texto del `message`.
 - Cuando `order-service` reenvía un error de `product-service` (ej. al reservar stock), propaga el `code`/`message` originales en vez de taparlos con un mensaje genérico (ver `parse_upstream_error` en `services/order-service/errors.py`).
 
+## Comunicación entre microservicios
+
+- **Timeouts explícitos:** toda llamada de `order-service` a `product-service` tiene un timeout de 10s (`PRODUCT_SERVICE_TIMEOUT_SECONDS`) — nunca se queda esperando indefinidamente si el otro servicio no responde.
+- **Reintentos, pero solo donde son seguros:** `reserve-stock` y `release-stock` **no son idempotentes** (llamarlos dos veces descuenta/devuelve stock dos veces), así que `order-service` reintenta (hasta 2 veces, con backoff corto) *solo* ante `ConnectionError` — el request nunca llegó al otro servicio, reintentar no tiene riesgo. Un timeout de lectura (`ReadTimeout`, el request sí pudo haber llegado y procesarse) **no se reintenta**: se propaga como `503` de inmediato, para no arriesgar una doble reserva. Ver `_post_to_product_service` en `services/order-service/app.py`.
+- **Correlation ID (`X-Request-ID`):** el frontend genera un UUID por request (`frontend/lib/api.ts`); el gateway lo respeta si viene, o genera uno con `$request_id` de nginx si no; cada microservicio lo lee (o genera uno si lo llaman directo), lo devuelve en la respuesta, y lo incluye en cada línea de log (`middleware.py` en cada servicio) — incluida la propagación de `order-service` hacia `product-service` en las llamadas internas. Esto permite seguir un mismo request a través de los logs de varios servicios, por ejemplo cuando `product-service` está caído:
+  ```
+  [2026-09-17 20:06:44] [trace-retry-test] WARNING in order-service: No se pudo conectar a product-service (intento 1/2), reintentando...
+  ```
+- **URLs de servicios centralizadas:** `docker-compose.yml` es la única fuente de verdad de cómo se direccionan los servicios entre sí (`PRODUCT_SERVICE_URL=http://product-service:5002`, nombres de servicio = hostnames de Docker); `config.py` de cada servicio solo tiene un fallback para correrlo suelto (tests, `flask run` local).
+
 ## Notas de diseño / simplificaciones
 
 - Cada microservicio usa su propia base de datos dentro del mismo Postgres (aislamiento lógico, sin compartir tablas).
@@ -175,7 +185,7 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: logs estructurados (JSON) y métricas, health vs. readiness separados, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

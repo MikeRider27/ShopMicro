@@ -6,6 +6,16 @@ def test_health(client):
     assert resp.status_code == 200
 
 
+def test_request_id_is_generated_when_missing(client):
+    resp = client.get("/health")
+    assert resp.headers.get("X-Request-ID")
+
+
+def test_request_id_is_echoed_when_provided(client):
+    resp = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    assert resp.headers.get("X-Request-ID") == "abc-123"
+
+
 def test_list_products_empty(client):
     resp = client.get("/products")
     assert resp.status_code == 200

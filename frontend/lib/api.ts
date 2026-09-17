@@ -9,6 +9,10 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Correlation ID: viaja hasta cada microservicio (ver nginx.conf y
+    // middleware.py en cada servicio) para poder seguir un mismo request en
+    // los logs de todos ellos.
+    "X-Request-ID": crypto.randomUUID(),
     ...(options.headers as Record<string, string> | undefined),
   };
   if (token) {

@@ -11,6 +11,16 @@ def test_health(client):
     assert resp.get_json()["status"] == "ok"
 
 
+def test_request_id_is_generated_when_missing(client):
+    resp = client.get("/health")
+    assert resp.headers.get("X-Request-ID")
+
+
+def test_request_id_is_echoed_when_provided(client):
+    resp = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    assert resp.headers.get("X-Request-ID") == "abc-123"
+
+
 def test_register_success(client):
     resp = register(client)
     assert resp.status_code == 201

@@ -1,8 +1,9 @@
 import logging
 import os
+import time
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
 from flask_migrate import Migrate
@@ -10,10 +11,18 @@ from sqlalchemy.exc import IntegrityError
 
 from config import build_config
 from errors import error_response, parse_upstream_error, register_error_handlers
+from middleware import register_request_id
 from models import Order, OrderItem, db
 from schemas import CreateOrderSchema
 
 PRODUCT_SERVICE_TIMEOUT_SECONDS = 10
+
+# reserve-stock y release-stock NO son idempotentes (llamarlos dos veces
+# descuenta/devuelve stock dos veces), así que solo es seguro reintentarlos
+# cuando el request nunca llegó a product-service (ConnectionError). Un
+# Timeout NO se reintenta acá: no sabemos si ya se procesó del otro lado.
+MAX_CONNECTION_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 0.2
 
 logger = logging.getLogger("order-service")
 
@@ -29,6 +38,7 @@ def create_app(testing: bool = False) -> Flask:
     CORS(app, origins=config["CORS_ORIGINS"])
     register_error_handlers(app)
     register_jwt_error_handlers(jwt)
+    register_request_id(app, "order-service")
 
     if testing:
         # En producción el esquema lo crean las migraciones (ver migrations/).
@@ -54,6 +64,36 @@ def register_jwt_error_handlers(jwt: JWTManager) -> None:
 
 
 def register_routes(app: Flask) -> None:
+    def _post_to_product_service(path: str, json_payload):
+        """POST a product-service, propagando el X-Request-ID del request
+        actual para poder correlacionar logs entre los dos servicios.
+
+        Reintenta (hasta MAX_CONNECTION_RETRIES veces) solo si la conexión
+        falló antes de llegar a destino (ConnectionError/ConnectTimeout). Un
+        Timeout de lectura (el request sí llegó, product-service tardó en
+        responder) se propaga sin reintentar: reserve-stock/release-stock no
+        son idempotentes, reintentar ahí podría descontar o devolver stock
+        dos veces.
+        """
+        url = f"{app.config['PRODUCT_SERVICE_URL']}{path}"
+        headers = {"X-Request-ID": g.get("request_id", "-")}
+        attempt = 0
+        while True:
+            try:
+                return requests.post(
+                    url, json=json_payload, timeout=PRODUCT_SERVICE_TIMEOUT_SECONDS, headers=headers
+                )
+            except requests.exceptions.ConnectionError:
+                attempt += 1
+                if attempt > MAX_CONNECTION_RETRIES:
+                    raise
+                logger.warning(
+                    "No se pudo conectar a product-service (intento %s/%s), reintentando...",
+                    attempt,
+                    MAX_CONNECTION_RETRIES,
+                )
+                time.sleep(RETRY_BACKOFF_SECONDS)
+
     @app.get("/health")
     def health():
         return jsonify(status="ok", service="order-service")
@@ -67,11 +107,7 @@ def register_routes(app: Flask) -> None:
             {"product_id": i["product_id"], "quantity": i["quantity"]} for i in items
         ]
         try:
-            resp = requests.post(
-                f"{app.config['PRODUCT_SERVICE_URL']}/internal/release-stock",
-                json=payload,
-                timeout=PRODUCT_SERVICE_TIMEOUT_SECONDS,
-            )
+            resp = _post_to_product_service("/internal/release-stock", payload)
             if resp.status_code != 200:
                 logger.error("Falló la compensación de stock: %s", resp.text)
         except requests.RequestException:
@@ -100,11 +136,7 @@ def register_routes(app: Flask) -> None:
         ]
 
         try:
-            resp = requests.post(
-                f"{app.config['PRODUCT_SERVICE_URL']}/internal/reserve-stock",
-                json=reserve_payload,
-                timeout=PRODUCT_SERVICE_TIMEOUT_SECONDS,
-            )
+            resp = _post_to_product_service("/internal/reserve-stock", reserve_payload)
         except requests.RequestException:
             return error_response("PRODUCT_SERVICE_UNAVAILABLE", "product-service no disponible", 503)
 

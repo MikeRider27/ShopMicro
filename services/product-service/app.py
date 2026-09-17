@@ -9,6 +9,7 @@ from marshmallow import ValidationError
 
 from config import build_config
 from errors import error_response, register_error_handlers
+from middleware import register_request_id
 from models import Category, Product, db
 from schemas import ProductCreateSchema, ProductUpdateSchema, StockItemSchema
 
@@ -77,6 +78,7 @@ def create_app(testing: bool = False) -> Flask:
     Migrate(app, db)
     CORS(app, origins=config["CORS_ORIGINS"])
     register_error_handlers(app)
+    register_request_id(app, "product-service")
 
     limiter = Limiter(
         key_func=get_remote_address,

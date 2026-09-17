@@ -12,4 +12,4 @@ COPY . .
 
 EXPOSE 5001
 
-CMD ["gunicorn", "-b", "0.0.0.0:5001", "-w", "2", "app:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:5001", "-w", "2", "--preload", "app:app"]

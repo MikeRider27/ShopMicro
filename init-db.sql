@@ -1,7 +1,12 @@
--- Ejecutar UNA VEZ contra el Postgres externo (192.168.11.220:5436) como user postgres:
---   psql -h 192.168.11.220 -p 5436 -U postgres -f init-db.sql
+-- NOTA: desde que docker-compose.yml incluye su propio contenedor de Postgres,
+-- este script YA NO hace falta para el flujo por defecto (las bases se crean
+-- automáticamente vía docker/postgres-initdb/01-create-databases.sh la primera
+-- vez que arranca ese contenedor).
 --
--- Crea una base de datos separada por microservicio (aislamiento lógico).
+-- Este script queda solo para quien prefiera usar un Postgres externo/propio en
+-- vez del contenedor incluido. Ejecutar UNA VEZ contra ese servidor:
+--   psql -h <host> -p <puerto> -U <usuario> -f init-db.sql
+--
 -- Las tablas dentro de cada base las crea el propio microservicio al arrancar
 -- (SQLAlchemy db.create_all()).
 

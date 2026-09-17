@@ -1,24 +1,63 @@
 name: ecommerce
 
 x-db-env: &db-env
-  POSTGRES_HOST: ${POSTGRES_HOST:-192.168.11.220}
-  POSTGRES_PORT: ${POSTGRES_PORT:-5436}
-  POSTGRES_USER: ${POSTGRES_USER:-postgres}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123}
+  POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      - ecommerce-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    networks:
+      - ecommerce-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   auth-service:
     build: ./services/auth-service
     container_name: ecommerce-auth-service
     environment:
       <<: *db-env
       POSTGRES_DB: ${AUTH_DB_NAME:-ecommerce_auth}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ACCESS_TOKEN_EXPIRES_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRES_MINUTES:-60}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      REDIS_URL: redis://redis:6379/0
     expose:
       - "5001"
     networks:
       - ecommerce-net
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
       interval: 10s
@@ -31,12 +70,19 @@ services:
     environment:
       <<: *db-env
       POSTGRES_DB: ${PRODUCTS_DB_NAME:-ecommerce_products}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:-admin-secret}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      REDIS_URL: redis://redis:6379/0
     expose:
       - "5002"
     networks:
       - ecommerce-net
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
       interval: 10s
@@ -49,7 +95,8 @@ services:
     environment:
       <<: *db-env
       POSTGRES_DB: ${ORDERS_DB_NAME:-ecommerce_orders}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       PRODUCT_SERVICE_URL: http://product-service:5002
     expose:
       - "5003"
@@ -57,7 +104,10 @@ services:
       - ecommerce-net
     restart: unless-stopped
     depends_on:
-      - product-service
+      postgres:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')"]
       interval: 10s
@@ -74,9 +124,12 @@ services:
     networks:
       - ecommerce-net
     depends_on:
-      - auth-service
-      - product-service
-      - order-service
+      auth-service:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -98,3 +151,6 @@ services:
 networks:
   ecommerce-net:
     driver: bridge
+
+volumes:
+  pgdata:

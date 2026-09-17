@@ -36,6 +36,7 @@ def test_create_order_requires_idempotency_key(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
+    assert resp.get_json()["error"]["code"] == "MISSING_IDEMPOTENCY_KEY"
 
 
 def test_create_order_missing_items(client, auth_headers):
@@ -85,7 +86,9 @@ def test_create_order_rejects_unknown_fields(client, auth_headers):
         headers=with_key(auth_headers),
     )
     assert resp.status_code == 400
-    assert "total" in resp.get_json()["details"]
+    body = resp.get_json()["error"]
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "total" in body["details"]
 
 
 def test_create_order_invalid_item_shape(client, auth_headers):
@@ -116,13 +119,19 @@ def test_create_order_success(mock_post, client, auth_headers):
 
 @patch("app.requests.post")
 def test_create_order_insufficient_stock(mock_post, client, auth_headers):
-    mock_post.return_value = FakeResponse(409, {"error": "stock insuficiente"})
+    mock_post.return_value = FakeResponse(
+        409, {"error": {"code": "INSUFFICIENT_STOCK", "message": "stock insuficiente para 'X'"}}
+    )
     resp = client.post(
         "/orders",
         json={"items": [{"product_id": 1, "quantity": 999}], "shipping_address": "Calle 1"},
         headers=with_key(auth_headers),
     )
     assert resp.status_code == 409
+    # El código y mensaje de product-service se propagan tal cual, no se
+    # pierden detrás de un mensaje genérico.
+    assert resp.get_json()["error"]["code"] == "INSUFFICIENT_STOCK"
+    assert resp.get_json()["error"]["message"] == "stock insuficiente para 'X'"
 
 
 @patch("app.requests.post")
@@ -179,6 +188,7 @@ def test_create_order_compensates_when_save_fails(mock_post, client, auth_header
         )
 
     assert resp.status_code == 500
+    assert resp.get_json()["error"]["code"] == "ORDER_SAVE_FAILED"
     assert mock_post.call_count == 2
     release_call = mock_post.call_args_list[1]
     assert release_call.args[0].endswith("/internal/release-stock")
@@ -212,3 +222,20 @@ def test_list_orders_after_creation(mock_post, client, auth_headers):
 def test_get_order_not_found(client, auth_headers):
     resp = client.get("/orders/999", headers=auth_headers)
     assert resp.status_code == 404
+    assert resp.get_json()["error"]["code"] == "ORDER_NOT_FOUND"
+
+
+def test_create_order_without_token_returns_missing_token_code(client):
+    resp = client.post(
+        "/orders",
+        json={"items": [{"product_id": 1, "quantity": 1}], "shipping_address": "x"},
+        headers={"Idempotency-Key": "k1"},
+    )
+    assert resp.status_code == 401
+    assert resp.get_json()["error"]["code"] == "MISSING_TOKEN"
+
+
+def test_unknown_route_returns_json_error(client):
+    resp = client.get("/no-existe")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"]["code"] == "NOT_FOUND"

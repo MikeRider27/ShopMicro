@@ -11,25 +11,11 @@ from flask_jwt_extended import (
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
-from marshmallow import ValidationError
 
 from config import build_config
+from errors import error_response, register_error_handlers
 from models import User, db
 from schemas import LoginSchema, RegisterSchema
-
-
-def parse_json(schema):
-    """Valida el body JSON contra un schema de marshmallow.
-
-    Devuelve (payload, None) si es válido, o (None, (response, 400)) con el
-    detalle de los errores por campo si no lo es. Rechaza tipos incorrectos,
-    campos faltantes y campos desconocidos (unknown="raise", el default de
-    marshmallow) antes de tocar la base de datos.
-    """
-    try:
-        return schema.load(request.get_json(silent=True) or {}), None
-    except ValidationError as err:
-        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
 
 
 def create_app(testing: bool = False) -> Flask:
@@ -39,8 +25,10 @@ def create_app(testing: bool = False) -> Flask:
 
     db.init_app(app)
     Migrate(app, db)
-    JWTManager(app)
+    jwt = JWTManager(app)
     CORS(app, origins=config["CORS_ORIGINS"])
+    register_error_handlers(app)
+    register_jwt_error_handlers(jwt)
 
     limiter = Limiter(
         key_func=get_remote_address,
@@ -63,6 +51,23 @@ def create_app(testing: bool = False) -> Flask:
     return app
 
 
+def register_jwt_error_handlers(jwt: JWTManager) -> None:
+    """Mismo formato de error para fallas de JWT que para el resto del
+    servicio (por default, flask-jwt-extended devuelve {"msg": "..."})."""
+
+    @jwt.unauthorized_loader
+    def missing_token(reason):
+        return error_response("MISSING_TOKEN", "se requiere un token de autenticación", 401)
+
+    @jwt.invalid_token_loader
+    def invalid_token(reason):
+        return error_response("INVALID_TOKEN", "token inválido", 422)
+
+    @jwt.expired_token_loader
+    def expired_token(jwt_header, jwt_payload):
+        return error_response("TOKEN_EXPIRED", "el token expiró, iniciá sesión de nuevo", 401)
+
+
 def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.get("/health")
     def health():
@@ -71,15 +76,13 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/register")
     @limiter.limit("10 per minute")
     def register():
-        payload, error = parse_json(RegisterSchema())
-        if error:
-            return error
+        payload = RegisterSchema().load(request.get_json(silent=True) or {})
 
         email = payload["email"].strip().lower()
         name = payload["name"].strip()
 
         if User.query.filter_by(email=email).first():
-            return jsonify(error="el email ya está registrado"), 409
+            return error_response("EMAIL_ALREADY_REGISTERED", "el email ya está registrado", 409)
 
         user = User(email=email, name=name)
         user.set_password(payload["password"])
@@ -92,14 +95,12 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/login")
     @limiter.limit("10 per minute")
     def login():
-        payload, error = parse_json(LoginSchema())
-        if error:
-            return error
+        payload = LoginSchema().load(request.get_json(silent=True) or {})
 
         email = payload["email"].strip().lower()
         user = User.query.filter_by(email=email).first()
         if not user or not user.check_password(payload["password"]):
-            return jsonify(error="credenciales inválidas"), 401
+            return error_response("INVALID_CREDENTIALS", "credenciales inválidas", 401)
 
         token = create_access_token(identity=str(user.id))
         return jsonify(user=user.to_dict(), access_token=token)
@@ -110,7 +111,7 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
         user_id = get_jwt_identity()
         user = db.session.get(User, int(user_id))
         if not user:
-            return jsonify(error="usuario no encontrado"), 404
+            return error_response("USER_NOT_FOUND", "usuario no encontrado", 404)
         return jsonify(user=user.to_dict())
 
 

@@ -6,10 +6,10 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, get_jwt_identity, jwt_required
 from flask_migrate import Migrate
-from marshmallow import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from config import build_config
+from errors import error_response, parse_upstream_error, register_error_handlers
 from models import Order, OrderItem, db
 from schemas import CreateOrderSchema
 
@@ -25,8 +25,10 @@ def create_app(testing: bool = False) -> Flask:
 
     db.init_app(app)
     Migrate(app, db)
-    JWTManager(app)
+    jwt = JWTManager(app)
     CORS(app, origins=config["CORS_ORIGINS"])
+    register_error_handlers(app)
+    register_jwt_error_handlers(jwt)
 
     if testing:
         # En producción el esquema lo crean las migraciones (ver migrations/).
@@ -35,6 +37,20 @@ def create_app(testing: bool = False) -> Flask:
 
     register_routes(app)
     return app
+
+
+def register_jwt_error_handlers(jwt: JWTManager) -> None:
+    @jwt.unauthorized_loader
+    def missing_token(reason):
+        return error_response("MISSING_TOKEN", "se requiere un token de autenticación", 401)
+
+    @jwt.invalid_token_loader
+    def invalid_token(reason):
+        return error_response("INVALID_TOKEN", "token inválido", 422)
+
+    @jwt.expired_token_loader
+    def expired_token(jwt_header, jwt_payload):
+        return error_response("TOKEN_EXPIRED", "el token expiró, iniciá sesión de nuevo", 401)
 
 
 def register_routes(app: Flask) -> None:
@@ -67,13 +83,9 @@ def register_routes(app: Flask) -> None:
         user_id = int(get_jwt_identity())
         idempotency_key = request.headers.get("Idempotency-Key", "").strip()
         if not idempotency_key:
-            return jsonify(error="el header Idempotency-Key es requerido"), 400
+            return error_response("MISSING_IDEMPOTENCY_KEY", "el header Idempotency-Key es requerido", 400)
 
-        try:
-            payload = CreateOrderSchema().load(request.get_json(silent=True) or {})
-        except ValidationError as err:
-            return jsonify(error="datos inválidos", details=err.messages), 400
-
+        payload = CreateOrderSchema().load(request.get_json(silent=True) or {})
         shipping_address = payload["shipping_address"]
 
         # Idempotencia: si ya procesamos este intento (mismo usuario + key),
@@ -94,11 +106,11 @@ def register_routes(app: Flask) -> None:
                 timeout=PRODUCT_SERVICE_TIMEOUT_SECONDS,
             )
         except requests.RequestException:
-            return jsonify(error="product-service no disponible"), 503
+            return error_response("PRODUCT_SERVICE_UNAVAILABLE", "product-service no disponible", 503)
 
         if resp.status_code != 200:
-            error_message = resp.json().get("error", "no se pudo reservar el stock")
-            return jsonify(error=error_message), resp.status_code
+            code, message = parse_upstream_error(resp, "STOCK_RESERVATION_FAILED", "no se pudo reservar el stock")
+            return error_response(code, message, resp.status_code)
 
         reserved_items = resp.json()["items"]
         total = sum(i["unit_price"] * i["quantity"] for i in reserved_items)
@@ -133,7 +145,7 @@ def register_routes(app: Flask) -> None:
             existing = Order.query.filter_by(user_id=user_id, idempotency_key=idempotency_key).first()
             if existing:
                 return jsonify(order=existing.to_dict()), 200
-            return jsonify(error="conflicto al guardar el pedido, reintentá"), 409
+            return error_response("ORDER_CONFLICT", "conflicto al guardar el pedido, reintentá", 409)
         except Exception:
             # Cualquier falla acá (DB caída, timeout, bug) deja stock
             # reservado sin pedido asociado si no compensamos: por eso el
@@ -141,7 +153,11 @@ def register_routes(app: Flask) -> None:
             db.session.rollback()
             logger.exception("Falló al guardar el pedido tras reservar stock, compensando...")
             _release_stock(reserved_items)
-            return jsonify(error="no se pudo guardar el pedido, el stock reservado fue liberado"), 500
+            return error_response(
+                "ORDER_SAVE_FAILED",
+                "no se pudo guardar el pedido, el stock reservado fue liberado",
+                500,
+            )
 
         return jsonify(order=order.to_dict()), 201
 
@@ -158,7 +174,7 @@ def register_routes(app: Flask) -> None:
         user_id = int(get_jwt_identity())
         order = db.session.get(Order, order_id)
         if not order or order.user_id != user_id:
-            return jsonify(error="pedido no encontrado"), 404
+            return error_response("ORDER_NOT_FOUND", "pedido no encontrado", 404)
         return jsonify(order=order.to_dict())
 
 

@@ -8,26 +8,21 @@ from flask_migrate import Migrate
 from marshmallow import ValidationError
 
 from config import build_config
+from errors import error_response, register_error_handlers
 from models import Category, Product, db
 from schemas import ProductCreateSchema, ProductUpdateSchema, StockItemSchema
 
 
-def parse_json(schema, **load_kwargs):
-    try:
-        return schema.load(request.get_json(silent=True) or {}, **load_kwargs), None
-    except ValidationError as err:
-        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
-
-
 def parse_json_list(schema):
-    """Para endpoints cuyo body es una lista plana (reserve/release-stock)."""
+    """Para endpoints cuyo body es una lista plana (reserve/release-stock).
+    Cualquier problema de forma se levanta como ValidationError para que lo
+    resuelva el mismo handler global que el resto de los errores de
+    validación (ver errors.py)."""
     items = request.get_json(silent=True)
     if not isinstance(items, list) or not items:
-        return None, (jsonify(error="se requiere una lista de items"), 400)
-    try:
-        return schema.load(items, many=True), None
-    except ValidationError as err:
-        return None, (jsonify(error="datos inválidos", details=err.messages), 400)
+        raise ValidationError({"_schema": ["se requiere una lista de items"]})
+    return schema.load(items, many=True)
+
 
 SEED_CATEGORIES = ["Electrónica", "Ropa", "Hogar", "Libros"]
 SEED_PRODUCTS = [
@@ -81,6 +76,7 @@ def create_app(testing: bool = False) -> Flask:
     db.init_app(app)
     Migrate(app, db)
     CORS(app, origins=config["CORS_ORIGINS"])
+    register_error_handlers(app)
 
     limiter = Limiter(
         key_func=get_remote_address,
@@ -132,7 +128,7 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     def get_product(product_id):
         product = db.session.get(Product, product_id)
         if not product:
-            return jsonify(error="producto no encontrado"), 404
+            return error_response("PRODUCT_NOT_FOUND", "producto no encontrado", 404)
         return jsonify(product=product.to_dict())
 
     @app.get("/categories")
@@ -144,17 +140,17 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @limiter.limit("20 per minute")
     def create_product():
         if not require_admin():
-            return jsonify(error="no autorizado"), 403
+            return error_response("INVALID_ADMIN_KEY", "no autorizado", 403)
 
-        payload, error = parse_json(ProductCreateSchema())
-        if error:
-            return error
+        payload = ProductCreateSchema().load(request.get_json(silent=True) or {})
 
         category = None
         if payload.get("category_id") is not None:
             category = db.session.get(Category, payload["category_id"])
             if not category:
-                return jsonify(error=f"categoría {payload['category_id']} no existe"), 400
+                return error_response(
+                    "INVALID_CATEGORY", f"categoría {payload['category_id']} no existe", 400
+                )
 
         product = Product(
             name=payload["name"],
@@ -172,19 +168,17 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @limiter.limit("20 per minute")
     def update_product(product_id):
         if not require_admin():
-            return jsonify(error="no autorizado"), 403
+            return error_response("INVALID_ADMIN_KEY", "no autorizado", 403)
         product = db.session.get(Product, product_id)
         if not product:
-            return jsonify(error="producto no encontrado"), 404
+            return error_response("PRODUCT_NOT_FOUND", "producto no encontrado", 404)
 
-        payload, error = parse_json(ProductUpdateSchema())
-        if error:
-            return error
+        payload = ProductUpdateSchema().load(request.get_json(silent=True) or {})
 
         if "category_id" in payload:
             category_id = payload["category_id"]
             if category_id is not None and not db.session.get(Category, category_id):
-                return jsonify(error=f"categoría {category_id} no existe"), 400
+                return error_response("INVALID_CATEGORY", f"categoría {category_id} no existe", 400)
             product.category_id = category_id
 
         for field in ("name", "description", "price", "stock", "image_url"):
@@ -198,10 +192,10 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @limiter.limit("20 per minute")
     def delete_product(product_id):
         if not require_admin():
-            return jsonify(error="no autorizado"), 403
+            return error_response("INVALID_ADMIN_KEY", "no autorizado", 403)
         product = db.session.get(Product, product_id)
         if not product:
-            return jsonify(error="producto no encontrado"), 404
+            return error_response("PRODUCT_NOT_FOUND", "producto no encontrado", 404)
         db.session.delete(product)
         db.session.commit()
         return jsonify(message="producto eliminado")
@@ -209,18 +203,20 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
     @app.post("/internal/reserve-stock")
     def reserve_stock():
         """Usado por order-service para validar y descontar stock al crear un pedido."""
-        items, error = parse_json_list(StockItemSchema())
-        if error:
-            return error
+        items = parse_json_list(StockItemSchema())
 
         products_by_id = {}
         for item in items:
             product = db.session.get(Product, item["product_id"])
             if not product:
-                return jsonify(error=f"producto {item['product_id']} no existe"), 404
+                return error_response(
+                    "PRODUCT_NOT_FOUND", f"producto {item['product_id']} no existe", 404
+                )
             quantity = item["quantity"]
             if product.stock < quantity:
-                return jsonify(error=f"stock insuficiente para '{product.name}'"), 409
+                return error_response(
+                    "INSUFFICIENT_STOCK", f"stock insuficiente para '{product.name}'", 409
+                )
             products_by_id[product.id] = (product, quantity)
 
         reserved = []
@@ -245,9 +241,7 @@ def register_routes(app: Flask, limiter: Limiter) -> None:
         cuyo producto ya no exista (mejor-esfuerzo: no tiene sentido fallar
         una compensación).
         """
-        items, error = parse_json_list(StockItemSchema())
-        if error:
-            return error
+        items = parse_json_list(StockItemSchema())
 
         released = []
         skipped = []

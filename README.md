@@ -150,7 +150,22 @@ Los tres microservicios validan el body de sus endpoints de escritura con [Marsh
 - **Tipos y rangos:** `email` con formato válido (auth-service), `price`/`stock` numéricos y no negativos, `quantity`/`product_id` enteros positivos (product-service, order-service).
 - **Campos arbitrarios rechazados:** marshmallow usa `unknown="raise"` por default — mandar un campo no declarado (ej. `is_admin` en un registro, o `total` en la creación de un pedido) devuelve `400` en vez de ignorarse silenciosamente.
 - **Antes de tocar la base o a otro servicio:** la validación corre primero; recién si pasa se consulta la base de datos o se llama a `product-service`.
-- Los errores de validación devuelven `{"error": "datos inválidos", "details": {...}}` con el detalle por campo que da marshmallow.
+## Manejo de errores
+
+Los tres microservicios devuelven todos sus errores con el mismo formato:
+
+```json
+{ "error": { "code": "PRODUCT_NOT_FOUND", "message": "producto no encontrado" } }
+```
+
+`details` aparece solo cuando aplica (errores de validación, con el detalle por campo de marshmallow). Esto lo resuelven handlers globales (`errors.py` en cada servicio), no cada endpoint por separado:
+
+- Errores de validación (`marshmallow.ValidationError`) → `400 VALIDATION_ERROR` con `details`.
+- Cualquier `HTTPException` de Flask/Werkzeug (404 de una ruta que no existe, 405, 429 del rate limiter, etc.) → mismo formato, con un code genérico según el status (`NOT_FOUND`, `METHOD_NOT_ALLOWED`, `RATE_LIMITED`...).
+- Fallas de JWT (auth-service, order-service) → `MISSING_TOKEN` / `TOKEN_EXPIRED` (401) o `INVALID_TOKEN` (422), en vez del `{"msg": "..."}` que da flask-jwt-extended por default.
+- Cualquier excepción no prevista → `500 INTERNAL_ERROR` genérico; el detalle real (traceback, mensaje de SQL, etc.) se loguea del lado del servidor pero **nunca** se manda al cliente.
+- Errores de negocio tienen su propio code (`EMAIL_ALREADY_REGISTERED`, `INSUFFICIENT_STOCK`, `INVALID_ADMIN_KEY`, `ORDER_NOT_FOUND`, etc.), así el frontend (o cualquier consumidor de la API) puede reaccionar a un `code` en vez de parsear el texto del `message`.
+- Cuando `order-service` reenvía un error de `product-service` (ej. al reservar stock), propaga el `code`/`message` originales en vez de taparlos con un mensaje genérico (ver `parse_upstream_error` en `services/order-service/errors.py`).
 
 ## Notas de diseño / simplificaciones
 
@@ -160,7 +175,7 @@ Los tres microservicios validan el body de sus endpoints de escritura con [Marsh
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: manejo de errores global consistente (formato `{error:{code,message,details}}` con handlers para 401/403/404/409/422/500/503), correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
+Mejoras identificadas y no incluidas todavía en este alcance: correlation IDs y métricas, hardening adicional de Docker (usuario no root), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY).
 
 ------------------------------------------------------------------------
 

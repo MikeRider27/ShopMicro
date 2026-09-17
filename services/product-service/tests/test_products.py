@@ -15,6 +15,7 @@ def test_list_products_empty(client):
 def test_create_product_requires_admin_key(client):
     resp = client.post("/products", json={"name": "X", "price": 1})
     assert resp.status_code == 403
+    assert resp.get_json()["error"]["code"] == "INVALID_ADMIN_KEY"
 
 
 def test_create_product_success(client):
@@ -62,7 +63,9 @@ def test_create_product_rejects_unknown_fields(client):
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == 400
-    assert "sku" in resp.get_json()["details"]
+    body = resp.get_json()["error"]
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "sku" in body["details"]
 
 
 def test_create_product_unknown_category(client):
@@ -77,6 +80,13 @@ def test_create_product_unknown_category(client):
 def test_get_product_not_found(client):
     resp = client.get("/products/999")
     assert resp.status_code == 404
+    assert resp.get_json()["error"]["code"] == "PRODUCT_NOT_FOUND"
+
+
+def test_unknown_route_returns_json_error(client):
+    resp = client.get("/no-existe")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"]["code"] == "NOT_FOUND"
 
 
 def test_get_product_found(client, sample_product):
@@ -147,6 +157,7 @@ def test_reserve_stock_insufficient(client, sample_product):
         json=[{"product_id": sample_product["id"], "quantity": 999}],
     )
     assert resp.status_code == 409
+    assert resp.get_json()["error"]["code"] == "INSUFFICIENT_STOCK"
 
 
 def test_reserve_stock_unknown_product(client):

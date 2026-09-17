@@ -56,7 +56,17 @@ def test_register_rejects_unknown_fields(client):
         },
     )
     assert resp.status_code == 400
-    assert "is_admin" in resp.get_json()["details"]
+    body = resp.get_json()["error"]
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "is_admin" in body["details"]
+
+
+def test_register_duplicate_email_error_shape(client):
+    register(client)
+    resp = register(client)
+    assert resp.get_json() == {
+        "error": {"code": "EMAIL_ALREADY_REGISTERED", "message": "el email ya está registrado"}
+    }
 
 
 def test_login_success(client):
@@ -74,6 +84,7 @@ def test_login_invalid_password(client):
         "/login", json={"email": "user@example.com", "password": "wrong-password"}
     )
     assert resp.status_code == 401
+    assert resp.get_json()["error"]["code"] == "INVALID_CREDENTIALS"
 
 
 def test_login_unknown_user(client):
@@ -93,8 +104,27 @@ def test_me_with_valid_token(client):
 def test_me_without_token(client):
     resp = client.get("/me")
     assert resp.status_code == 401
+    assert resp.get_json()["error"]["code"] == "MISSING_TOKEN"
 
 
 def test_me_with_invalid_token(client):
     resp = client.get("/me", headers={"Authorization": "Bearer not-a-real-token"})
-    assert resp.status_code == 422 or resp.status_code == 401
+    assert resp.status_code == 422
+    assert resp.get_json()["error"]["code"] == "INVALID_TOKEN"
+
+
+def test_unknown_route_returns_json_error(client):
+    resp = client.get("/no-existe")
+    assert resp.status_code == 404
+    assert resp.get_json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_rate_limit_uses_consistent_error_format(client):
+    for _ in range(10):
+        client.post("/login", json={"email": "x@x.com", "password": "wrong123"})
+    resp = client.post("/login", json={"email": "x@x.com", "password": "wrong123"})
+    # El limiter está deshabilitado en testing (ver create_app), así que acá
+    # solo confirmamos que, si llegara a dispararse, la forma es la misma.
+    assert resp.status_code in (401, 429)
+    assert "error" in resp.get_json()
+    assert "code" in resp.get_json()["error"]

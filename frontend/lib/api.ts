@@ -32,7 +32,8 @@ async function request<T>(
       }
       throw new Error("Tu sesión expiró. Inicia sesión de nuevo.");
     }
-    throw new Error(data.error || `Error ${res.status}`);
+    const message = typeof data.error === "object" ? data.error?.message : data.error;
+    throw new Error(message || `Error ${res.status}`);
   }
   return data as T;
 }

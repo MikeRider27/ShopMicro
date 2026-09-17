@@ -189,6 +189,15 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 - **Métricas básicas:** cada servicio expone `GET /metrics` en formato Prometheus — `http_requests_total`, `http_request_duration_seconds` y `http_request_errors_total`, con labels de método/endpoint/status. No requiere infraestructura extra, cualquier Prometheus puede scrapearlo directo.
 - **Health vs. readiness:** `GET /health` (liveness) no depende de nada externo — si responde, el proceso está vivo. `GET /readiness` chequea Postgres (y Redis donde aplica) y devuelve `503` si alguno falla; es lo que usa el `healthcheck` de `docker-compose.yml` para no marcar un servicio como sano si todavía no puede atender tráfico de verdad.
 
+## Docker
+
+- **Usuario no root:** los 4 servicios que construimos (auth/product/order-service y frontend) corren como usuario sin privilegios (`appuser` / `nextjs`), no como `root`. Postgres/Redis/nginx son imágenes oficiales que ya manejan esto internamente.
+- **Versiones de imagen base fijadas:** `python:3.12.14-slim-bookworm`, `node:20.20.2-alpine`, `nginx:1.27.5-alpine`, `postgres:16.15-alpine`, `redis:7.4.11-alpine` — nada de tags flotantes (`python:3.12-slim`, etc.) que puedan traer una versión distinta en cada build sin avisar.
+- **Dependencias con versión exacta:** todo `requirements.txt` usa `==` (nunca un rango); `package.json` fija versiones exactas de Next/React.
+- **`.dockerignore` por servicio:** cada microservicio Python excluye `tests/`, cachés de pytest/ruff, `requirements-dev.txt` y cualquier `.env` del build context, para no terminar herramientas de desarrollo ni secretos dentro de la imagen.
+- **Multi-stage build en el frontend:** `deps` → `builder` → `runner`; la imagen final no lleva `devDependencies` (TypeScript, Tailwind, etc.) ni el código fuente, solo el output standalone de Next.js.
+- **Limitación conocida:** `python:3.12.14-slim-bookworm` trae igual algunas vulnerabilidades reportadas a nivel de paquetes del SO (no de nuestro código) — es una realidad de cualquier imagen base Debian/Alpine, que requiere actualizarla periódicamente (ej. Dependabot/Renovate para PRs automáticos de rebuild), no algo que se resuelva de una vez.
+
 ## Notas de diseño / simplificaciones
 
 - Cada microservicio usa su propia base de datos dentro del mismo Postgres (aislamiento lógico, sin compartir tablas).
@@ -197,7 +206,7 @@ Los tres microservicios devuelven todos sus errores con el mismo formato:
 
 ## Roadmap
 
-Mejoras identificadas y no incluidas todavía en este alcance: hardening adicional de Docker (usuario no root, versiones de imágenes base fijadas), pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY). También quedan pendientes, mencionados por el plan de mejoras pero fuera de este alcance: un Prometheus/Grafana real scrapeando los `/metrics` (hoy solo se exponen), y agregación centralizada de logs (hoy quedan en `docker compose logs`, no en un ELK/Loki).
+Mejoras identificadas y no incluidas todavía en este alcance: pruebas E2E de frontend, documentación OpenAPI/Swagger, ADRs, y plantillas de GitHub (PR/Issues/CONTRIBUTING/SECURITY). También quedan pendientes, mencionados por el plan de mejoras pero fuera de este alcance: un Prometheus/Grafana real scrapeando los `/metrics` (hoy solo se exponen), agregación centralizada de logs (hoy quedan en `docker compose logs`, no en un ELK/Loki), y actualización automática de imágenes base (Dependabot/Renovate).
 
 ------------------------------------------------------------------------
 

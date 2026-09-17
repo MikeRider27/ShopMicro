@@ -8,7 +8,7 @@ x-db-env: &db-env
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     container_name: ecommerce-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -27,7 +27,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.11-alpine
     container_name: ecommerce-redis
     networks:
       - ecommerce-net
@@ -115,7 +115,7 @@ services:
       retries: 5
 
   gateway:
-    image: nginx:1.27-alpine
+    image: nginx:1.27.5-alpine
     container_name: ecommerce-gateway
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
